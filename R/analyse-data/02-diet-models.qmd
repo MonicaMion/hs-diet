@@ -1,0 +1,511 @@
+---
+title: "Testing some models for seal data"
+author: "Max Lindmark"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format: 
+  html:
+    toc: true
+    page-layout: full
+    embed-resources: true
+knitr: 
+  opts_chunk:
+    fig.align: center
+    out-width: 80%
+editor: source
+execute: 
+  echo: true
+  eval: true
+  cache: false
+---
+
+```{r}
+#| warning: false
+#| message: false
+
+library(ggplot2); theme_set(theme_light())
+library(stringr)
+library(tidyr)
+library(dplyr)
+library(tidylog)
+library(ggeffects)
+library(sdmTMB)
+library(modelr)
+library(readr)
+
+home <- here::here()
+```
+
+Read data
+
+```{r}
+#| warning: false
+#| message: false
+
+d <- read_csv(paste0(home, "/data/HS_SKAG_matrix_biomass_abundance.csv")) |> 
+  janitor::clean_names() |> 
+  rename(pw = sum_biomass_not_corrected_g) |> 
+  mutate(family = as.factor(family),
+         year_f = as.factor(year),
+         year_ct = year - min(year),
+         month_f = as.factor(month))
+```
+
+Now expand the data so that every predator has one row for each prey type (currently no zeroes-by-prey group)
+
+```{r}
+#| warning: false
+#| message: false
+
+# Expand the data
+d <- d |>
+  group_by(sample_id) |>
+  complete(
+    family,
+    fill = list(
+      pw = 0,
+      sum_abundance = 0
+    )
+  ) |>
+  fill(lat, lon, year, month, quarter, year_f, year_ct, month_f,
+       .direction = "downup") |> 
+  ungroup()
+
+# Check if we need to summarise prey weight a bit more
+d |> 
+  summarise(sum_pw = sum(pw), .by = family) |> 
+  mutate(percent = (sum_pw / sum(sum_pw)) * 100) |> 
+  arrange(desc(percent))
+
+# Group all prey below 3% into "other"
+d <- d |>
+  mutate(percent = 100 * sum(pw) / sum(d$pw), .by = family) |>
+  mutate(family = if_else(percent < 3,
+                          "Other",
+                          as.character(family))) |>
+  select(-percent) |>
+  summarise(
+    pw = sum(pw),
+    sum_abundance = sum(sum_abundance),
+    .by = c(sample_id, family, lat, lon, year,
+            month, quarter, year_f, year_ct, month_f)
+  )
+```
+
+Explore the data quickly
+
+```{r}
+#| warning: false
+#| message: false
+
+head(d)
+
+ggplot(d, aes(lon, lat, color = as.factor(year))) + 
+  geom_point() + 
+  coord_sf()
+
+d |> 
+  summarise(n = n_distinct(sample_id), .by = year) |> 
+  ggplot(aes(year, n)) + 
+  geom_bar(stat = "identity")
+
+summary(d$pw)
+
+ggplot(d, aes(pw)) + 
+  geom_histogram()
+
+ggplot(d, aes(month)) + 
+  geom_histogram()
+```
+
+Fit a simple model, estimating the mean prey weight by family, ignoring space and time
+
+```{r}
+#| warning: false
+#| message: false
+
+# Fit a simple model
+# Let's use a delta_gamma model to have a bit more flexibility than a tweedie
+m1 <- sdmTMB(
+  pw ~ 0 + family,
+  data = d,
+  family = delta_gamma(type = "poisson-link"),
+  spatial = "off"
+)
+
+summary(m1)
+
+nd <- d |> 
+  distinct(family)
+
+# est here is the combined prediction from the binomial and the gamma model
+# It's the same as est1 + est2. This is one of the reasons we use a type = "poisson-link",
+# because in standard delta models the two sub models have different link functions and thereby
+# cannot be added
+p <- predict(m1, newdata = nd, se_fit = TRUE) |> 
+  mutate(upr = est + 1.96*est_se,
+         lwr = est - 1.96*est_se)
+
+ggplot(p, aes(exp(est), reorder(family, exp(est)))) + 
+  geom_point() + 
+  geom_errorbar(aes(xmin = exp(lwr), xmax = exp(upr)),
+                width = 0, alpha = 0.5)
+
+# Check residuals of the combined model (both components). We do this with dharma
+res <- simulate(m1, nsim = 300, type = "mle-mvn") |>
+  dharma_residuals(m1, plot = FALSE)
+
+# Plot residuals
+res |> 
+  ggplot(aes(observed, expected)) +
+  geom_point(color = "grey30", shape = 21, size = 0.5) +
+  geom_abline(col = "tomato3", linewidth = 0.6) +
+  theme(aspect.ratio = 1) +
+  labs(x = "Observed", y = "Expected")
+
+# It looks slightly better if you remove the uncommon families
+```
+
+Now add year to the model. There are many options for how. We'll look into a factor year, linear year and autoregressive year effects.
+
+```{r}
+#| warning: false
+#| message: false
+
+m2 <- sdmTMB(
+  pw ~ 0 + family + year_f,
+  data = d,
+  family = delta_gamma(type = "poisson-link"),
+  spatial = "off"
+)
+
+nd2 <- d |> 
+  distinct(family, year_f)
+
+p2 <- predict(m2, newdata = nd2, se_fit = TRUE) |> 
+  mutate(upr = est + 1.96*est_se,
+         lwr = est - 1.96*est_se,
+         year = as.numeric(as.character(year_f)))
+
+p2 |> 
+  summarise(est = mean(est),
+            upr = mean(upr),
+            lwr = mean(lwr), .by = family) |> 
+  ggplot(aes(exp(est), reorder(family, exp(est)))) + 
+  geom_point() + 
+  geom_errorbar(aes(xmin = exp(lwr), xmax = exp(upr)),
+                width = 0, alpha = 0.5)
+
+# Now plot the year-prediction
+p2 |> 
+  ggplot(aes(year, exp(est), color = family, fill = family)) + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = exp(lwr), ymax = exp(upr)),
+              alpha = 0.3, color = NA) +
+  facet_wrap(~family)
+
+# And now the total prey weight over time
+p2 |> 
+  summarise(est = mean(est),
+            upr = mean(upr),
+            lwr = mean(lwr), .by = year) |> 
+  ggplot(aes(year, exp(est))) + 
+  geom_point() + 
+  geom_errorbar(aes(ymin = exp(lwr), ymax = exp(upr)),
+                alpha = 0.3, width = 0)
+```
+
+Linear year effect
+
+```{r}
+#| warning: false
+#| message: false
+
+m3 <- sdmTMB(
+  pw ~ family + year_ct, # use centered year to aid convergence
+  data = d,
+  family = delta_gamma(type = "poisson-link"),
+  spatial = "off"
+)
+
+nd3 <- d |> 
+  distinct(family, year_ct, year)
+
+p3 <- predict(m3, newdata = nd3, se_fit = TRUE) |> 
+  mutate(upr = est + 1.96*est_se,
+         lwr = est - 1.96*est_se)
+
+p3 |> 
+  summarise(est = mean(est),
+            upr = mean(upr),
+            lwr = mean(lwr), .by = family) |> 
+  ggplot(aes(exp(est), reorder(family, exp(est)))) + 
+  geom_point() + 
+  geom_errorbar(aes(xmin = exp(lwr), xmax = exp(upr)),
+                width = 0, alpha = 0.5)
+
+# Now plot the year-prediction
+p3 |> 
+  ggplot(aes(year, exp(est), color = family, fill = family)) + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = exp(lwr), ymax = exp(upr)),
+              alpha = 0.3, color = NA) +
+  facet_wrap(~family) 
+
+# And now the total prey weight over time
+p3 |> 
+  summarise(est = mean(est),
+            upr = mean(upr),
+            lwr = mean(lwr), .by = year) |> 
+  ggplot(aes(year, exp(est))) + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = exp(lwr), ymax = exp(upr)),
+              alpha = 0.3, color = NA)
+```
+
+Linear year effect but different slopes for each family
+
+```{r}
+#| warning: false
+#| message: false
+
+m4 <- sdmTMB(
+  pw ~ family*year_ct, # use centered year to aid convergence
+  data = d,
+  family = delta_gamma(type = "poisson-link"),
+  spatial = "off"
+)
+
+nd4 <- d |> 
+  distinct(family, year_ct, year)
+
+p4 <- predict(m4, newdata = nd4, se_fit = TRUE) |> 
+  mutate(upr = est + 1.96*est_se,
+         lwr = est - 1.96*est_se)
+
+# TODO: Based on the exploded uncertainty here, I would maybe play around with adding priors on the fixed effects...
+p4 |> 
+  summarise(est = mean(est),
+            upr = mean(upr),
+            lwr = mean(lwr), .by = family) |> 
+  ggplot(aes(exp(est), reorder(family, exp(est)))) + 
+  geom_point() + 
+  geom_errorbar(aes(xmin = exp(lwr), xmax = exp(upr)),
+                width = 0, alpha = 0.5)
+
+# Now plot the year-prediction
+p4 |> 
+  ggplot(aes(year, exp(est), color = family, fill = family)) + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = exp(lwr), ymax = exp(upr)),
+              alpha = 0.3, color = NA) +
+  facet_wrap(~family) 
+
+# And now the total prey weight over time
+p4 |> 
+  summarise(est = mean(est),
+            upr = mean(upr),
+            lwr = mean(lwr), .by = year) |> 
+  ggplot(aes(year, exp(est))) + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = exp(lwr), ymax = exp(upr)),
+              alpha = 0.3, color = NA)
+```
+
+The interaction above explodes for some families..
+
+What if we wanted to model time for as a time series, using an autoregressive approach?
+
+```{r}
+#| warning: false
+#| message: false
+
+m5 <- sdmTMB(
+  pw ~ 1 + family,
+  data = d,
+  time_varying = ~1,
+  # TODO: we could also do a random walk, but ar1 seems easier to converge. basically: do we want the trend to be able to drift off
+  # (only year before matters), or do we want the annual values to revert to mean in absence of data?
+  time_varying_type = "ar1",
+  # now that we are modelling a process over time, we need to specify any missing years we want to predict over, using process error only
+  extra_time = 2023,
+  # we also need to define which is our time-column, now that we have a temporal model
+  time = "year",
+  family = delta_gamma(type = "poisson-link"),
+  # when we add a time-component, the default is to add a spatiotemporal field. We turn this off for now! 
+  spatial = "off",
+  spatiotemporal = "off"
+)
+
+summary(m5)
+
+sanity(m5)
+
+nd5 <- d |> 
+  distinct(family, year) |> 
+  # add the missing year, 2023!
+  bind_rows(d |> 
+              distinct(family) |> 
+              mutate(year = 2023))
+  
+p5 <- predict(m5, newdata = nd5, se_fit = TRUE) |> 
+  mutate(upr = est + 1.96*est_se,
+         lwr = est - 1.96*est_se)
+
+p5 |> 
+  summarise(est = mean(est),
+            upr = mean(upr),
+            lwr = mean(lwr), .by = family) |> 
+  ggplot(aes(exp(est), reorder(family, exp(est)))) + 
+  geom_point() + 
+  geom_errorbar(aes(xmin = exp(lwr), xmax = exp(upr)),
+                width = 0, alpha = 0.5)
+
+# Now plot the year-prediction
+p5 |> 
+  ggplot(aes(year, exp(est), color = family, fill = family)) + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = exp(lwr), ymax = exp(upr)),
+              alpha = 0.3, color = NA) +
+  facet_wrap(~family) 
+
+# And now the total prey weight over time
+# Note how we get an estimate for 2023 now!
+p5 |> 
+  summarise(est = mean(est),
+            upr = mean(upr),
+            lwr = mean(lwr), .by = year) |> 
+  ggplot(aes(year, exp(est))) + 
+  geom_point() + 
+  geom_errorbar(aes(ymin = exp(lwr), ymax = exp(upr)),
+                alpha = 0.3, width = NA)
+```
+
+```{r}
+#| warning: false
+#| message: false
+
+AIC(m1, m2, m3, m4, m5) |> 
+  arrange(AIC)
+```
+
+Now testing adding spatial random effects
+
+```{r}
+#| warning: false
+#| message: false
+
+d <- d |> 
+  add_utm_columns(ll_names = c("lon", "lat"))
+
+mesh <- make_mesh(d, xy_cols = c("X", "Y"), type = "cutoff", cutoff = 4)
+
+plot(mesh)
+
+mesh$mesh$n
+
+m6 <- sdmTMB(
+  pw ~ 0 + family + year_f,
+  data = d,
+  mesh = mesh,
+  family = delta_gamma(type = "poisson-link"),
+  # TODO: this can be explored a bit. From experience and from testing with this data a bit,
+  # it's much easier to estimate the binomial part (including any random effects), compared to the positive biomass part
+  # Hence I estimate here only a spatial random effect for the binomial part.
+  spatial = list("on", "off"),
+  # priors = sdmTMBpriors(
+  #   matern_s = pc_matern(range_gt = 5, sigma_lt = 1)
+  #   )
+)
+
+summary(m6)
+sanity(m6)
+
+nd6 <- d |> 
+  distinct(family, year, year_f)
+
+p6 <- predict(m6, newdata = nd6, se_fit = TRUE, re_form = NA) |> 
+  mutate(upr = est + 1.96*est_se,
+         lwr = est - 1.96*est_se)
+
+p6 |> 
+  summarise(est = mean(est),
+            upr = mean(upr),
+            lwr = mean(lwr), .by = family) |> 
+  ggplot(aes(exp(est), reorder(family, exp(est)))) + 
+  geom_point() + 
+  geom_errorbar(aes(xmin = exp(lwr), xmax = exp(upr)),
+                width = 0, alpha = 0.5)
+
+# Now plot the year-prediction
+p6 |> 
+  ggplot(aes(year, exp(est), color = family, fill = family)) + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = exp(lwr), ymax = exp(upr)),
+              alpha = 0.3, color = NA) +
+  facet_wrap(~family) 
+
+# And now the total prey weight over time
+p6 |> 
+  summarise(est = mean(est),
+            upr = mean(upr),
+            lwr = mean(lwr), .by = year) |> 
+  ggplot(aes(year, exp(est))) + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = exp(lwr), ymax = exp(upr)),
+              alpha = 0.3, color = NA)
+```
+
+```{r}
+#| warning: false
+#| message: false
+
+m7 <- sdmTMB(
+  pw ~ 1 + family,
+  data = d,
+  time_varying = ~1,
+  time_varying_type = "ar1",
+  mesh = mesh,
+  extra_time = 2023,
+  time = "year",
+  family = delta_gamma(type = "poisson-link"),
+  spatial = list("on", "off"),
+  spatiotemporal = "off"
+)
+
+
+# Plot spatial random effect?
+nd7 <- d |>
+  distinct(X, Y, lon, lat) |> 
+  mutate(year_f = as.factor("2011"),
+         family = as.factor("Gadidae"))
+
+p7 <- predict(m6, newdata = nd7, re_form_iid = NA)
+
+p7
+
+p7 |> 
+  filter(lat > 57.7) |> 
+  ggplot(aes(lon, lat, color = omega_s1)) + 
+  geom_point(size = 2) + 
+  scale_color_gradient2()
+```
+
+It's a pretty clear pattern here, that the amount of prey in the stomachs declines with distance from coast!
+
+```{r}
+AIC(m1, m2, m3, m4, m5, m6, m7) |> 
+  arrange(AIC)
+```
+
+Now, AIC says the model 2 is most parsimonious. It has a separate intercept for each year, and a separate intercept for each family.
+
+I do think the AICs are not THAT far off. We definitely do not have to be so restrictive and dismiss spatial and/or ar1 models at this point, since they fit nicely. I also think it's nice to model the mean prey weight as a ar1 process, because its' more in line with how time series work (we do expect 2012 to be more similar to 2011). Also the clear spatial pattern in precense/absence warrants a deeper investigation.
+
+A few things to follow up on: 
+
+1. Can we estimate a spatiotemporal random field? (different spatial predictions every year?)
+
+2. Can we estimate spatial variability in prey types? One way to do that is to model family as an intercept (like we do), and spatial deviation on top off that with spatial_varying = ~0 + family? Then we would have spatial differences in predicted diets, which we can relate to trawl data
+
+3. s(day, by = prey?)
+
