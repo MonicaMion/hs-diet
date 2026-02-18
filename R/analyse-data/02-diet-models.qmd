@@ -1,6 +1,6 @@
 ---
 title: "Testing some models for seal data"
-author: "Max Lindmark"
+author: "Max Lindmark & Monica Mion"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
 format: 
   html:
