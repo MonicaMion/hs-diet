@@ -1,0 +1,58 @@
+---
+title: "Prepare matrix diet"
+author: "Monica Mion"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format: 
+  html:
+    toc: true
+    page-layout: full
+    embed-resources: true
+knitr: 
+  opts_chunk:
+    fig.align: center
+    out-width: 80%
+editor: source
+execute: 
+  echo: true
+  eval: true
+  cache: false
+---
+
+## Load packages and set working directory
+
+```{r}
+#| message: false
+# Install libraries if not already installed using install.packages("package_name")
+library(dplyr)
+
+home <- here::here()
+```
+
+# Read data
+```{r}
+data <- read.csv(paste0(home, "/Data/HS_SKAG_estimated_abundance_biomass.csv"), fileEncoding = "UTF-8")
+```
+
+# Make matrix
+```{r}
+matrix_data <- data %>%
+  filter(!is.na(biomass_not_corrected)) %>%   # ← IMPORTANT
+  group_by(
+    Sample.ID,
+    Family
+  ) %>%
+  summarise(
+    sum_biomass_not_corrected = sum(biomass_not_corrected, na.rm = TRUE),
+    sum_abundance = ceiling(sum(abundance, na.rm = TRUE)),
+    .groups = "drop"
+  )
+```
+
+# Save matrix
+```{r}
+write.csv(
+  matrix_data,paste0(home, "/Data/HS_SKAG_matrix_biomass_abundance_filtered_ok.csv",
+  row.names = FALSE
+))
+```
+
