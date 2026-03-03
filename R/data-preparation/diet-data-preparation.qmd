@@ -1,0 +1,306 @@
+---
+title: "Prepare raw diet data"
+author: "Max Lindmark & Monica Mion"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format: 
+  html:
+    toc: true
+    page-layout: full
+    embed-resources: true
+knitr: 
+  opts_chunk:
+    fig.align: center
+    out-width: 80%
+editor: source
+execute: 
+  echo: true
+  eval: true
+  cache: false
+---
+
+## Load packages and set working directory
+
+```{r}
+#| message: false
+# Install libraries if not already installed using install.packages("package_name")
+library(dplyr)
+
+home <- here::here()
+```
+
+## Load data
+
+```{r READ RAW DATA}
+data <- read.csv(paste0(home, "/Data/HS_SKAG_raw data_stomachs.csv"), fileEncoding = "UTF-8")
+## Replace empty strings with NA
+data <- data %>%
+  mutate(across(where(is.character), ~ na_if(., "")))
+
+## Standardize prey remain labels
+data <- data %>%
+  mutate(
+    Prey.remain = tolower(trimws(Prey.remain))
+  )
+```
+
+## Load regression tables
+```{r}
+reg_FL <- read.csv(paste0(home, "/Data/Regression-otolith/Regressions_otolith_FL.csv"))
+reg_FW <- read.csv(paste0(home,"/Data/Regression-otolith/Regressions_otolith_FW.csv"))
+
+## Harmonize taxon column
+reg_FL <- reg_FL %>% rename(Prey.species..lat. = Form_Taxon)
+reg_FW <- reg_FW %>% rename(Prey.species..lat. = Form_Taxon)
+```
+
+## Prepare length regressions
+```{r}
+reg_OW_FL <- reg_FL %>%
+  filter(Goal_unit == "Lenght (FL)", Count_variabel == "OW") %>%
+  select(Prey.species..lat., a_OW_FL = a, b_OW_FL = b)
+
+reg_OL_FL <- reg_FL %>%
+  filter(Goal_unit == "Lenght (FL)", Count_variabel == "OL") %>%
+  select(Prey.species..lat., a_OL_FL = a, b_OL_FL = b)
+```
+
+## Join length regressions
+```{r}
+data <- data %>%
+  left_join(reg_OW_FL, by = "Prey.species..lat.") %>%
+  left_join(reg_OL_FL, by = "Prey.species..lat.")
+## Ensure numeric otolith values
+data <- data %>%
+  mutate(
+    Otolith.width..mm.   = as.numeric(Otolith.width..mm.),
+    Otolith.length...mm. = as.numeric(Otolith.length...mm.)
+  )
+```
+
+## Calculate fish length (FL_not_corrected)
+
+```{r}
+data <- data %>%
+  mutate(
+    FL_not_corrected = case_when(
+      !is.na(Otolith.width..mm.) &
+        !is.na(a_OW_FL) & !is.na(b_OW_FL) ~
+        a_OW_FL + b_OW_FL * Otolith.width..mm.,
+      
+      is.na(Otolith.width..mm.) &
+        !is.na(Otolith.length...mm.) &
+        !is.na(a_OL_FL) & !is.na(b_OL_FL) ~
+        a_OL_FL + b_OL_FL * Otolith.length...mm.,
+      
+      TRUE ~ NA_real_
+    )
+  )
+```
+
+## Prepare weight regressions
+
+```{r}
+reg_OW_FW <- reg_FW %>%
+  filter(Goal_unit == "Weight (FW)", Count_variabel == "OW") %>%
+  select(Prey.species..lat., a_OW_FW = a, b_OW_FW = b, Regression_OW = Regression)
+
+reg_OL_FW <- reg_FW %>%
+  filter(Goal_unit == "Weight (FW)", Count_variabel == "OL") %>%
+  select(Prey.species..lat., a_OL_FW = a, b_OL_FW = b, Regression_OL = Regression)
+
+reg_FL_FW <- reg_FW %>%
+  filter(Goal_unit == "Weight (FW)", Count_variabel == "FL") %>%
+  select(Prey.species..lat., a_FL_FW = a, b_FL_FW = b, Regression_FL = Regression)
+```
+
+## Join weight regressions
+
+```{r}
+data <- data %>%
+  left_join(reg_OW_FW, by = "Prey.species..lat.") %>%
+  left_join(reg_OL_FW, by = "Prey.species..lat.") %>%
+  left_join(reg_FL_FW, by = "Prey.species..lat.")
+```
+
+## DEFINE AVAILABLE MEASURED FL
+
+```{r}
+data <- data %>%
+  mutate(
+    all_FL_available_ok = case_when(
+      Prey.remain %in% c("whole fish", "whole body", "whole individual") &
+        !is.na(Prey.length.measured..cm.) ~
+        as.numeric(Prey.length.measured..cm.),
+      TRUE ~ NA_real_
+    )
+  )
+```
+
+## CALCULATE FISH WEIGHT (FW_not_corrected)
+
+```{r}
+data <- data %>%
+  mutate(
+    FW_not_corrected = case_when(
+      
+      ## Stickleback fixed mass
+      Family == "Gasterosteidae" ~ 1.22,
+      
+      ## Otolith width regressions
+      !is.na(Otolith.width..mm.) &
+        Regression_OW == "Y=(aX)^b" ~
+        (a_OW_FW * Otolith.width..mm.)^b_OW_FW,
+      
+      !is.na(Otolith.width..mm.) &
+        Regression_OW == "Y=aX^b" ~
+        a_OW_FW * Otolith.width..mm.^b_OW_FW,
+      
+      !is.na(Otolith.width..mm.) &
+        Regression_OW == "Y=a+bX" ~
+        a_OW_FW + b_OW_FW * Otolith.width..mm.,
+      
+      ## Otolith length regressions
+      is.na(Otolith.width..mm.) &
+        !is.na(Otolith.length...mm.) &
+        Regression_OL == "Y=(aX)^b" ~
+        (a_OL_FW * Otolith.length...mm.)^b_OL_FW,
+      
+      is.na(Otolith.width..mm.) &
+        !is.na(Otolith.length...mm.) &
+        Regression_OL == "Y=aX^b" ~
+        a_OL_FW * Otolith.length...mm.^b_OL_FW,
+      
+      is.na(Otolith.width..mm.) &
+        !is.na(Otolith.length...mm.) &
+        Regression_OL == "Y=a+bX" ~
+        a_OL_FW + b_OL_FW * Otolith.length...mm.,
+      
+      ## Measured FL regressions
+      !is.na(all_FL_available_ok) &
+        Regression_FL == "W(g)=(a*10^-6* L(cm)^b) *1000" ~
+        (a_FL_FW * 1e-6 * (all_FL_available_ok^b_FL_FW)) * 1000,
+      
+      !is.na(all_FL_available_ok) &
+        Regression_FL %in% c("Y=aX^b", "Y=(aX)^b") ~
+        a_FL_FW * (all_FL_available_ok^b_FL_FW),
+      
+      TRUE ~ NA_real_
+    )
+  )
+```
+
+## Calculate abundance
+
+```{r}
+data <- data %>%
+  mutate(
+    n = as.numeric(n),
+    abundance = case_when(
+      Prey.remain %in% c("otolith", "broken otolith") ~ n / 2,
+      Prey.remain == "spine" & Family == "Gasterosteidae" ~ n / 5,
+      Prey.remain %in% c(
+        "whole fish", "whole individual", "fragment", "bones",
+        "green bones", "plastic", "stone", "scales",
+        "dermal plaques", "teeth", "eggs"
+      ) ~ n,
+      TRUE ~ NA_real_
+    )
+  )
+```
+
+## Calculate biomass
+
+```{r}
+data <- data %>%
+  mutate(
+    biomass_not_corrected = FW_not_corrected * abundance
+  )
+
+write.csv(
+  data,paste0(home, "/Data/HS_SKAG_estimated_abundance_biomass.csv"),
+  row.names = FALSE
+)
+```
+
+## Quick checks
+
+```{r}
+summary(data$FL_not_corrected)
+summary(data$FW_not_corrected)
+summary(data$biomass_not_corrected)
+```
+
+## Check for missing regressions
+
+```{r}
+## --- Unique prey taxa in stomach data 
+
+prey_data <- data %>%
+  distinct(Prey.species..lat.)
+
+## --- Available regressions: LENGTH 
+
+reg_length_available <- reg_FL %>%
+  filter(Goal_unit == "Lenght (FL)") %>%
+  distinct(Prey.species..lat.)
+
+## --- Available regressions: WEIGHT -----------------------
+
+reg_weight_available <- reg_FW %>%
+  filter(Goal_unit == "Weight (FW)") %>%
+  distinct(Prey.species..lat.)
+
+## --- Combine checks --------------------------------------
+
+regression_check <- prey_data %>%
+  left_join(
+    reg_length_available %>% mutate(has_FL_regression = TRUE),
+    by = "Prey.species..lat."
+  ) %>%
+  left_join(
+    reg_weight_available %>% mutate(has_FW_regression = TRUE),
+    by = "Prey.species..lat."
+  ) %>%
+  mutate(
+    has_FL_regression = ifelse(is.na(has_FL_regression), FALSE, has_FL_regression),
+    has_FW_regression = ifelse(is.na(has_FW_regression), FALSE, has_FW_regression)
+  )
+
+## --- Summary flags 
+
+regression_check <- regression_check %>%
+  mutate(
+    missing_FL = !has_FL_regression,
+    missing_FW = !has_FW_regression,
+    missing_both = missing_FL & missing_FW
+  )
+
+## --- RESULTS 
+
+## Species missing ANY regression
+missing_any <- regression_check %>%
+  filter(missing_FL | missing_FW)
+
+## Species missing BOTH length and weight regressions
+missing_both <- regression_check %>%
+  filter(missing_both)
+
+## Species with full coverage
+complete_coverage <- regression_check %>%
+  filter(!missing_FL & !missing_FW)
+
+############################################
+# PRINT RESULTS
+############################################
+
+cat("\n--- Species missing ANY regression ---\n")
+print(missing_any)
+
+cat("\n--- Species missing BOTH FL and FW regressions ---\n")
+print(missing_both)
+
+cat("\n--- Species with complete regression coverage ---\n")
+print(complete_coverage)
+
+```
+
