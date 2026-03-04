@@ -56,3 +56,8 @@ write.csv(
 ))
 ```
 
+#Check matrix
+```{r}
+summary(matrix_data$sum_biomass_not_corrected)
+```
+
