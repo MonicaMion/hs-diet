@@ -35,8 +35,8 @@ data <- read.csv(paste0(home, "/Data/HS_SKAG_estimated_abundance_biomass.csv"), 
 
 # Make matrix
 ```{r}
-matrix_data <- data %>%
-  filter(!is.na(biomass_not_corrected)) %>%
+matrix_data <- data |>  
+  filter(!is.na(biomass_not_corrected)) |>
   summarise(
     sum_biomass_not_corrected = sum(biomass_not_corrected, na.rm = TRUE),
     sum_abundance = ceiling(sum(abundance, na.rm = TRUE)),

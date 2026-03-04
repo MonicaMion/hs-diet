@@ -41,13 +41,14 @@ Read data
 #| warning: false
 #| message: false
 
-d <- read_csv(paste0(home, "/data/HS_SKAG_matrix_biomass_abundance.csv")) |> 
+d <- read_csv(paste0(home, "/data/HS_SKAG_matrix_biomass_abundance_filtered_ok.csv")) |> 
   janitor::clean_names() |> 
-  rename(pw = sum_biomass_not_corrected_g) |> 
+  rename(pw = sum_biomass_not_corrected) |> 
   mutate(family = as.factor(family),
          year_f = as.factor(year),
          year_ct = year - min(year),
-         month_f = as.factor(month))
+         month_f = as.factor(month)) |> 
+  filter(lat > 57)
 ```
 
 Now expand the data so that every predator has one row for each prey type (currently no zeroes-by-prey group)
@@ -109,6 +110,9 @@ d |>
   geom_bar(stat = "identity")
 
 summary(d$pw)
+
+d |> 
+  filter(pw > 20000)
 
 ggplot(d, aes(pw)) + 
   geom_histogram()

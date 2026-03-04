@@ -3131,12 +3131,12 @@ vertical-align: -.125em;
 <div class="cell" data-layout-align="center">
 <div class="sourceCode cell-code" id="cb2"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> <span class="fu">read.csv</span>(<span class="fu">paste0</span>(home, <span class="st">&quot;/Data/HS_SKAG_raw data_stomachs.csv&quot;</span>), <span class="at">fileEncoding =</span> <span class="st">&quot;UTF-8&quot;</span>)</span>
 <span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="do">## Replace empty strings with NA</span></span>
-<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> data <span class="sc">%&gt;%</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> data <span class="sc">|&gt;</span></span>
 <span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(<span class="fu">across</span>(<span class="fu">where</span>(is.character), <span class="sc">~</span> <span class="fu">na_if</span>(., <span class="st">&quot;&quot;</span>)))</span>
 <span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a><span class="do">## Standardize prey remain labels</span></span>
-<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> data <span class="sc">%&gt;%</span></span>
-<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(</span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> data <span class="sc">|&gt;</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(  </span>
 <span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a>    <span class="at">Prey.remain =</span> <span class="fu">tolower</span>(<span class="fu">trimws</span>(Prey.remain))</span>
 <span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a>  )</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </div>
@@ -3148,30 +3148,30 @@ vertical-align: -.125em;
 <span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>reg_FW <span class="ot">&lt;-</span> <span class="fu">read.csv</span>(<span class="fu">paste0</span>(home,<span class="st">&quot;/Data/Regression-otolith/Regressions_otolith_FW.csv&quot;</span>))</span>
 <span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a><span class="do">## Harmonize taxon column</span></span>
-<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>reg_FL <span class="ot">&lt;-</span> reg_FL <span class="sc">%&gt;%</span> <span class="fu">rename</span>(<span class="at">Prey.species..lat. =</span> Form_Taxon)</span>
-<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>reg_FW <span class="ot">&lt;-</span> reg_FW <span class="sc">%&gt;%</span> <span class="fu">rename</span>(<span class="at">Prey.species..lat. =</span> Form_Taxon)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>reg_FL <span class="ot">&lt;-</span> reg_FL <span class="sc">|&gt;</span> <span class="fu">rename</span>(<span class="at">Prey.species..lat. =</span> Form_Taxon)</span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>reg_FW <span class="ot">&lt;-</span> reg_FW <span class="sc">|&gt;</span> <span class="fu">rename</span>(<span class="at">Prey.species..lat. =</span> Form_Taxon)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </div>
 </section>
 <section id="prepare-length-regressions" class="level2">
 <h2 class="anchored" data-anchor-id="prepare-length-regressions">Prepare length regressions</h2>
 <div class="cell" data-layout-align="center">
-<div class="sourceCode cell-code" id="cb4"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a>reg_OW_FL <span class="ot">&lt;-</span> reg_FL <span class="sc">%&gt;%</span></span>
-<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(Goal_unit <span class="sc">==</span> <span class="st">&quot;Lenght (FL)&quot;</span>, Count_variabel <span class="sc">==</span> <span class="st">&quot;OW&quot;</span>) <span class="sc">%&gt;%</span></span>
+<div class="sourceCode cell-code" id="cb4"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a>reg_OW_FL <span class="ot">&lt;-</span> reg_FL <span class="sc">|&gt;</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(Goal_unit <span class="sc">==</span> <span class="st">&quot;Lenght (FL)&quot;</span>, Count_variabel <span class="sc">==</span> <span class="st">&quot;OW&quot;</span>) <span class="sc">|&gt;</span></span>
 <span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>  <span class="fu">select</span>(Prey.species..lat., <span class="at">a_OW_FL =</span> a, <span class="at">b_OW_FL =</span> b)</span>
 <span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>reg_OL_FL <span class="ot">&lt;-</span> reg_FL <span class="sc">%&gt;%</span></span>
-<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(Goal_unit <span class="sc">==</span> <span class="st">&quot;Lenght (FL)&quot;</span>, Count_variabel <span class="sc">==</span> <span class="st">&quot;OL&quot;</span>) <span class="sc">%&gt;%</span></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>reg_OL_FL <span class="ot">&lt;-</span> reg_FL <span class="sc">|&gt;</span></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(Goal_unit <span class="sc">==</span> <span class="st">&quot;Lenght (FL)&quot;</span>, Count_variabel <span class="sc">==</span> <span class="st">&quot;OL&quot;</span>) <span class="sc">|&gt;</span></span>
 <span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>  <span class="fu">select</span>(Prey.species..lat., <span class="at">a_OL_FL =</span> a, <span class="at">b_OL_FL =</span> b)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </div>
 </section>
 <section id="join-length-regressions" class="level2">
 <h2 class="anchored" data-anchor-id="join-length-regressions">Join length regressions</h2>
 <div class="cell" data-layout-align="center">
-<div class="sourceCode cell-code" id="cb5"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> data <span class="sc">%&gt;%</span></span>
-<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">left_join</span>(reg_OW_FL, <span class="at">by =</span> <span class="st">&quot;Prey.species..lat.&quot;</span>) <span class="sc">%&gt;%</span></span>
+<div class="sourceCode cell-code" id="cb5"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> data <span class="sc">|&gt;</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">left_join</span>(reg_OW_FL, <span class="at">by =</span> <span class="st">&quot;Prey.species..lat.&quot;</span>) <span class="sc">|&gt;</span></span>
 <span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>  <span class="fu">left_join</span>(reg_OL_FL, <span class="at">by =</span> <span class="st">&quot;Prey.species..lat.&quot;</span>)</span>
 <span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a><span class="do">## Ensure numeric otolith values</span></span>
-<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> data <span class="sc">%&gt;%</span></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> data <span class="sc">|&gt;</span></span>
 <span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(</span>
 <span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>    <span class="at">Otolith.width..mm.   =</span> <span class="fu">as.numeric</span>(Otolith.width..mm.),</span>
 <span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a>    <span class="at">Otolith.length...mm. =</span> <span class="fu">as.numeric</span>(Otolith.length...mm.)</span>
@@ -3181,7 +3181,7 @@ vertical-align: -.125em;
 <section id="calculate-fish-length-fl_not_corrected" class="level2">
 <h2 class="anchored" data-anchor-id="calculate-fish-length-fl_not_corrected">Calculate fish length (FL_not_corrected)</h2>
 <div class="cell" data-layout-align="center">
-<div class="sourceCode cell-code" id="cb6"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> data <span class="sc">%&gt;%</span></span>
+<div class="sourceCode cell-code" id="cb6"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> data <span class="sc">|&gt;</span></span>
 <span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(</span>
 <span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a>    <span class="at">FL_not_corrected =</span> <span class="fu">case_when</span>(</span>
 <span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a>      <span class="sc">!</span><span class="fu">is.na</span>(Otolith.width..mm.) <span class="sc">&amp;</span></span>
@@ -3201,32 +3201,32 @@ vertical-align: -.125em;
 <section id="prepare-weight-regressions" class="level2">
 <h2 class="anchored" data-anchor-id="prepare-weight-regressions">Prepare weight regressions</h2>
 <div class="cell" data-layout-align="center">
-<div class="sourceCode cell-code" id="cb7"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a>reg_OW_FW <span class="ot">&lt;-</span> reg_FW <span class="sc">%&gt;%</span></span>
-<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(Goal_unit <span class="sc">==</span> <span class="st">&quot;Weight (FW)&quot;</span>, Count_variabel <span class="sc">==</span> <span class="st">&quot;OW&quot;</span>) <span class="sc">%&gt;%</span></span>
+<div class="sourceCode cell-code" id="cb7"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a>reg_OW_FW <span class="ot">&lt;-</span> reg_FW <span class="sc">|&gt;</span></span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(Goal_unit <span class="sc">==</span> <span class="st">&quot;Weight (FW)&quot;</span>, Count_variabel <span class="sc">==</span> <span class="st">&quot;OW&quot;</span>) <span class="sc">|&gt;</span></span>
 <span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>  <span class="fu">select</span>(Prey.species..lat., <span class="at">a_OW_FW =</span> a, <span class="at">b_OW_FW =</span> b, <span class="at">Regression_OW =</span> Regression)</span>
 <span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a>reg_OL_FW <span class="ot">&lt;-</span> reg_FW <span class="sc">%&gt;%</span></span>
-<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(Goal_unit <span class="sc">==</span> <span class="st">&quot;Weight (FW)&quot;</span>, Count_variabel <span class="sc">==</span> <span class="st">&quot;OL&quot;</span>) <span class="sc">%&gt;%</span></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a>reg_OL_FW <span class="ot">&lt;-</span> reg_FW <span class="sc">|&gt;</span></span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(Goal_unit <span class="sc">==</span> <span class="st">&quot;Weight (FW)&quot;</span>, Count_variabel <span class="sc">==</span> <span class="st">&quot;OL&quot;</span>) <span class="sc">|&gt;</span></span>
 <span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a>  <span class="fu">select</span>(Prey.species..lat., <span class="at">a_OL_FW =</span> a, <span class="at">b_OL_FW =</span> b, <span class="at">Regression_OL =</span> Regression)</span>
 <span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a>reg_FL_FW <span class="ot">&lt;-</span> reg_FW <span class="sc">%&gt;%</span></span>
-<span id="cb7-10"><a href="#cb7-10" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(Goal_unit <span class="sc">==</span> <span class="st">&quot;Weight (FW)&quot;</span>, Count_variabel <span class="sc">==</span> <span class="st">&quot;FL&quot;</span>) <span class="sc">%&gt;%</span></span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a>reg_FL_FW <span class="ot">&lt;-</span> reg_FW <span class="sc">|&gt;</span></span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(Goal_unit <span class="sc">==</span> <span class="st">&quot;Weight (FW)&quot;</span>, Count_variabel <span class="sc">==</span> <span class="st">&quot;FL&quot;</span>) <span class="sc">|&gt;</span></span>
 <span id="cb7-11"><a href="#cb7-11" aria-hidden="true" tabindex="-1"></a>  <span class="fu">select</span>(Prey.species..lat., <span class="at">a_FL_FW =</span> a, <span class="at">b_FL_FW =</span> b, <span class="at">Regression_FL =</span> Regression)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </div>
 </section>
 <section id="join-weight-regressions" class="level2">
 <h2 class="anchored" data-anchor-id="join-weight-regressions">Join weight regressions</h2>
 <div class="cell" data-layout-align="center">
-<div class="sourceCode cell-code" id="cb8"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> data <span class="sc">%&gt;%</span></span>
-<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">left_join</span>(reg_OW_FW, <span class="at">by =</span> <span class="st">&quot;Prey.species..lat.&quot;</span>) <span class="sc">%&gt;%</span></span>
-<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a>  <span class="fu">left_join</span>(reg_OL_FW, <span class="at">by =</span> <span class="st">&quot;Prey.species..lat.&quot;</span>) <span class="sc">%&gt;%</span></span>
+<div class="sourceCode cell-code" id="cb8"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> data <span class="sc">|&gt;</span></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">left_join</span>(reg_OW_FW, <span class="at">by =</span> <span class="st">&quot;Prey.species..lat.&quot;</span>) <span class="sc">|&gt;</span></span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a>  <span class="fu">left_join</span>(reg_OL_FW, <span class="at">by =</span> <span class="st">&quot;Prey.species..lat.&quot;</span>) <span class="sc">|&gt;</span></span>
 <span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a>  <span class="fu">left_join</span>(reg_FL_FW, <span class="at">by =</span> <span class="st">&quot;Prey.species..lat.&quot;</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </div>
 </section>
 <section id="define-available-measured-fl" class="level2">
 <h2 class="anchored" data-anchor-id="define-available-measured-fl">DEFINE AVAILABLE MEASURED FL</h2>
 <div class="cell" data-layout-align="center">
-<div class="sourceCode cell-code" id="cb9"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> data <span class="sc">%&gt;%</span></span>
+<div class="sourceCode cell-code" id="cb9"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> data <span class="sc">|&gt;</span></span>
 <span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(</span>
 <span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a>    <span class="at">all_FL_available_ok =</span> <span class="fu">case_when</span>(</span>
 <span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a>      Prey.remain <span class="sc">%in%</span> <span class="fu">c</span>(<span class="st">&quot;whole fish&quot;</span>, <span class="st">&quot;whole body&quot;</span>, <span class="st">&quot;whole individual&quot;</span>) <span class="sc">&amp;</span></span>
@@ -3240,7 +3240,7 @@ vertical-align: -.125em;
 <section id="calculate-fish-weight-fw_not_corrected" class="level2">
 <h2 class="anchored" data-anchor-id="calculate-fish-weight-fw_not_corrected">CALCULATE FISH WEIGHT (FW_not_corrected)</h2>
 <div class="cell" data-layout-align="center">
-<div class="sourceCode cell-code" id="cb10"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> data <span class="sc">%&gt;%</span></span>
+<div class="sourceCode cell-code" id="cb10"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> data <span class="sc">|&gt;</span></span>
 <span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(</span>
 <span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a>    <span class="at">FW_not_corrected =</span> <span class="fu">case_when</span>(</span>
 <span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a>      </span>
@@ -3293,7 +3293,7 @@ vertical-align: -.125em;
 <section id="calculate-abundance" class="level2">
 <h2 class="anchored" data-anchor-id="calculate-abundance">Calculate abundance</h2>
 <div class="cell" data-layout-align="center">
-<div class="sourceCode cell-code" id="cb11"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> data <span class="sc">%&gt;%</span></span>
+<div class="sourceCode cell-code" id="cb11"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> data <span class="sc">|&gt;</span></span>
 <span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(</span>
 <span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a>    <span class="at">n =</span> <span class="fu">as.numeric</span>(n),</span>
 <span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a>    <span class="at">abundance =</span> <span class="fu">case_when</span>(</span>
@@ -3312,7 +3312,7 @@ vertical-align: -.125em;
 <section id="calculate-biomass" class="level2">
 <h2 class="anchored" data-anchor-id="calculate-biomass">Calculate biomass</h2>
 <div class="cell" data-layout-align="center">
-<div class="sourceCode cell-code" id="cb12"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> data <span class="sc">%&gt;%</span></span>
+<div class="sourceCode cell-code" id="cb12"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a>data <span class="ot">&lt;-</span> data <span class="sc">|&gt;</span></span>
 <span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(</span>
 <span id="cb12-3"><a href="#cb12-3" aria-hidden="true" tabindex="-1"></a>    <span class="at">biomass_not_corrected =</span> FW_not_corrected <span class="sc">*</span> abundance</span>
 <span id="cb12-4"><a href="#cb12-4" aria-hidden="true" tabindex="-1"></a>  )</span>
@@ -3348,32 +3348,32 @@ vertical-align: -.125em;
 <div class="cell" data-layout-align="center">
 <div class="sourceCode cell-code" id="cb19"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a><span class="do">## --- Unique prey taxa in stomach data </span></span>
 <span id="cb19-2"><a href="#cb19-2" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a>prey_data <span class="ot">&lt;-</span> data <span class="sc">%&gt;%</span></span>
+<span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a>prey_data <span class="ot">&lt;-</span> data <span class="sc">|&gt;</span></span>
 <span id="cb19-4"><a href="#cb19-4" aria-hidden="true" tabindex="-1"></a>  <span class="fu">distinct</span>(Prey.species..lat.)</span>
 <span id="cb19-5"><a href="#cb19-5" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb19-6"><a href="#cb19-6" aria-hidden="true" tabindex="-1"></a><span class="do">## --- Available regressions: LENGTH </span></span>
 <span id="cb19-7"><a href="#cb19-7" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb19-8"><a href="#cb19-8" aria-hidden="true" tabindex="-1"></a>reg_length_available <span class="ot">&lt;-</span> reg_FL <span class="sc">%&gt;%</span></span>
-<span id="cb19-9"><a href="#cb19-9" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(Goal_unit <span class="sc">==</span> <span class="st">&quot;Lenght (FL)&quot;</span>) <span class="sc">%&gt;%</span></span>
+<span id="cb19-8"><a href="#cb19-8" aria-hidden="true" tabindex="-1"></a>reg_length_available <span class="ot">&lt;-</span> reg_FL <span class="sc">|&gt;</span></span>
+<span id="cb19-9"><a href="#cb19-9" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(Goal_unit <span class="sc">==</span> <span class="st">&quot;Lenght (FL)&quot;</span>) <span class="sc">|&gt;</span></span>
 <span id="cb19-10"><a href="#cb19-10" aria-hidden="true" tabindex="-1"></a>  <span class="fu">distinct</span>(Prey.species..lat.)</span>
 <span id="cb19-11"><a href="#cb19-11" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb19-12"><a href="#cb19-12" aria-hidden="true" tabindex="-1"></a><span class="do">## --- Available regressions: WEIGHT -----------------------</span></span>
 <span id="cb19-13"><a href="#cb19-13" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb19-14"><a href="#cb19-14" aria-hidden="true" tabindex="-1"></a>reg_weight_available <span class="ot">&lt;-</span> reg_FW <span class="sc">%&gt;%</span></span>
-<span id="cb19-15"><a href="#cb19-15" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(Goal_unit <span class="sc">==</span> <span class="st">&quot;Weight (FW)&quot;</span>) <span class="sc">%&gt;%</span></span>
+<span id="cb19-14"><a href="#cb19-14" aria-hidden="true" tabindex="-1"></a>reg_weight_available <span class="ot">&lt;-</span> reg_FW <span class="sc">|&gt;</span></span>
+<span id="cb19-15"><a href="#cb19-15" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(Goal_unit <span class="sc">==</span> <span class="st">&quot;Weight (FW)&quot;</span>) <span class="sc">|&gt;</span></span>
 <span id="cb19-16"><a href="#cb19-16" aria-hidden="true" tabindex="-1"></a>  <span class="fu">distinct</span>(Prey.species..lat.)</span>
 <span id="cb19-17"><a href="#cb19-17" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb19-18"><a href="#cb19-18" aria-hidden="true" tabindex="-1"></a><span class="do">## --- Combine checks --------------------------------------</span></span>
 <span id="cb19-19"><a href="#cb19-19" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb19-20"><a href="#cb19-20" aria-hidden="true" tabindex="-1"></a>regression_check <span class="ot">&lt;-</span> prey_data <span class="sc">%&gt;%</span></span>
+<span id="cb19-20"><a href="#cb19-20" aria-hidden="true" tabindex="-1"></a>regression_check <span class="ot">&lt;-</span> prey_data <span class="sc">|&gt;</span></span>
 <span id="cb19-21"><a href="#cb19-21" aria-hidden="true" tabindex="-1"></a>  <span class="fu">left_join</span>(</span>
-<span id="cb19-22"><a href="#cb19-22" aria-hidden="true" tabindex="-1"></a>    reg_length_available <span class="sc">%&gt;%</span> <span class="fu">mutate</span>(<span class="at">has_FL_regression =</span> <span class="cn">TRUE</span>),</span>
+<span id="cb19-22"><a href="#cb19-22" aria-hidden="true" tabindex="-1"></a>    reg_length_available <span class="sc">|&gt;</span> <span class="fu">mutate</span>(<span class="at">has_FL_regression =</span> <span class="cn">TRUE</span>),</span>
 <span id="cb19-23"><a href="#cb19-23" aria-hidden="true" tabindex="-1"></a>    <span class="at">by =</span> <span class="st">&quot;Prey.species..lat.&quot;</span></span>
-<span id="cb19-24"><a href="#cb19-24" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">%&gt;%</span></span>
+<span id="cb19-24"><a href="#cb19-24" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">|&gt;</span></span>
 <span id="cb19-25"><a href="#cb19-25" aria-hidden="true" tabindex="-1"></a>  <span class="fu">left_join</span>(</span>
-<span id="cb19-26"><a href="#cb19-26" aria-hidden="true" tabindex="-1"></a>    reg_weight_available <span class="sc">%&gt;%</span> <span class="fu">mutate</span>(<span class="at">has_FW_regression =</span> <span class="cn">TRUE</span>),</span>
+<span id="cb19-26"><a href="#cb19-26" aria-hidden="true" tabindex="-1"></a>    reg_weight_available <span class="sc">|&gt;</span> <span class="fu">mutate</span>(<span class="at">has_FW_regression =</span> <span class="cn">TRUE</span>),</span>
 <span id="cb19-27"><a href="#cb19-27" aria-hidden="true" tabindex="-1"></a>    <span class="at">by =</span> <span class="st">&quot;Prey.species..lat.&quot;</span></span>
-<span id="cb19-28"><a href="#cb19-28" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">%&gt;%</span></span>
+<span id="cb19-28"><a href="#cb19-28" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">|&gt;</span></span>
 <span id="cb19-29"><a href="#cb19-29" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(</span>
 <span id="cb19-30"><a href="#cb19-30" aria-hidden="true" tabindex="-1"></a>    <span class="at">has_FL_regression =</span> <span class="fu">ifelse</span>(<span class="fu">is.na</span>(has_FL_regression), <span class="cn">FALSE</span>, has_FL_regression),</span>
 <span id="cb19-31"><a href="#cb19-31" aria-hidden="true" tabindex="-1"></a>    <span class="at">has_FW_regression =</span> <span class="fu">ifelse</span>(<span class="fu">is.na</span>(has_FW_regression), <span class="cn">FALSE</span>, has_FW_regression)</span>
@@ -3381,7 +3381,7 @@ vertical-align: -.125em;
 <span id="cb19-33"><a href="#cb19-33" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb19-34"><a href="#cb19-34" aria-hidden="true" tabindex="-1"></a><span class="do">## --- Summary flags </span></span>
 <span id="cb19-35"><a href="#cb19-35" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb19-36"><a href="#cb19-36" aria-hidden="true" tabindex="-1"></a>regression_check <span class="ot">&lt;-</span> regression_check <span class="sc">%&gt;%</span></span>
+<span id="cb19-36"><a href="#cb19-36" aria-hidden="true" tabindex="-1"></a>regression_check <span class="ot">&lt;-</span> regression_check <span class="sc">|&gt;</span></span>
 <span id="cb19-37"><a href="#cb19-37" aria-hidden="true" tabindex="-1"></a>  <span class="fu">mutate</span>(</span>
 <span id="cb19-38"><a href="#cb19-38" aria-hidden="true" tabindex="-1"></a>    <span class="at">missing_FL =</span> <span class="sc">!</span>has_FL_regression,</span>
 <span id="cb19-39"><a href="#cb19-39" aria-hidden="true" tabindex="-1"></a>    <span class="at">missing_FW =</span> <span class="sc">!</span>has_FW_regression,</span>
@@ -3391,15 +3391,15 @@ vertical-align: -.125em;
 <span id="cb19-43"><a href="#cb19-43" aria-hidden="true" tabindex="-1"></a><span class="do">## --- RESULTS </span></span>
 <span id="cb19-44"><a href="#cb19-44" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb19-45"><a href="#cb19-45" aria-hidden="true" tabindex="-1"></a><span class="do">## Species missing ANY regression</span></span>
-<span id="cb19-46"><a href="#cb19-46" aria-hidden="true" tabindex="-1"></a>missing_any <span class="ot">&lt;-</span> regression_check <span class="sc">%&gt;%</span></span>
+<span id="cb19-46"><a href="#cb19-46" aria-hidden="true" tabindex="-1"></a>missing_any <span class="ot">&lt;-</span> regression_check <span class="sc">|&gt;</span></span>
 <span id="cb19-47"><a href="#cb19-47" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(missing_FL <span class="sc">|</span> missing_FW)</span>
 <span id="cb19-48"><a href="#cb19-48" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb19-49"><a href="#cb19-49" aria-hidden="true" tabindex="-1"></a><span class="do">## Species missing BOTH length and weight regressions</span></span>
-<span id="cb19-50"><a href="#cb19-50" aria-hidden="true" tabindex="-1"></a>missing_both <span class="ot">&lt;-</span> regression_check <span class="sc">%&gt;%</span></span>
+<span id="cb19-50"><a href="#cb19-50" aria-hidden="true" tabindex="-1"></a>missing_both <span class="ot">&lt;-</span> regression_check <span class="sc">|&gt;</span></span>
 <span id="cb19-51"><a href="#cb19-51" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(missing_both)</span>
 <span id="cb19-52"><a href="#cb19-52" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb19-53"><a href="#cb19-53" aria-hidden="true" tabindex="-1"></a><span class="do">## Species with full coverage</span></span>
-<span id="cb19-54"><a href="#cb19-54" aria-hidden="true" tabindex="-1"></a>complete_coverage <span class="ot">&lt;-</span> regression_check <span class="sc">%&gt;%</span></span>
+<span id="cb19-54"><a href="#cb19-54" aria-hidden="true" tabindex="-1"></a>complete_coverage <span class="ot">&lt;-</span> regression_check <span class="sc">|&gt;</span></span>
 <span id="cb19-55"><a href="#cb19-55" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(<span class="sc">!</span>missing_FL <span class="sc">&amp;</span> <span class="sc">!</span>missing_FW)</span>
 <span id="cb19-56"><a href="#cb19-56" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb19-57"><a href="#cb19-57" aria-hidden="true" tabindex="-1"></a><span class="do">############################################</span></span>

@@ -33,12 +33,12 @@ home <- here::here()
 ```{r READ RAW DATA}
 data <- read.csv(paste0(home, "/Data/HS_SKAG_raw data_stomachs.csv"), fileEncoding = "UTF-8")
 ## Replace empty strings with NA
-data <- data %>%
+data <- data |>
   mutate(across(where(is.character), ~ na_if(., "")))
 
 ## Standardize prey remain labels
-data <- data %>%
-  mutate(
+data <- data |>
+  mutate(  
     Prey.remain = tolower(trimws(Prey.remain))
   )
 ```
@@ -49,28 +49,28 @@ reg_FL <- read.csv(paste0(home, "/Data/Regression-otolith/Regressions_otolith_FL
 reg_FW <- read.csv(paste0(home,"/Data/Regression-otolith/Regressions_otolith_FW.csv"))
 
 ## Harmonize taxon column
-reg_FL <- reg_FL %>% rename(Prey.species..lat. = Form_Taxon)
-reg_FW <- reg_FW %>% rename(Prey.species..lat. = Form_Taxon)
+reg_FL <- reg_FL |> rename(Prey.species..lat. = Form_Taxon)
+reg_FW <- reg_FW |> rename(Prey.species..lat. = Form_Taxon)
 ```
 
 ## Prepare length regressions
 ```{r}
-reg_OW_FL <- reg_FL %>%
-  filter(Goal_unit == "Lenght (FL)", Count_variabel == "OW") %>%
+reg_OW_FL <- reg_FL |>
+  filter(Goal_unit == "Lenght (FL)", Count_variabel == "OW") |>
   select(Prey.species..lat., a_OW_FL = a, b_OW_FL = b)
 
-reg_OL_FL <- reg_FL %>%
-  filter(Goal_unit == "Lenght (FL)", Count_variabel == "OL") %>%
+reg_OL_FL <- reg_FL |>
+  filter(Goal_unit == "Lenght (FL)", Count_variabel == "OL") |>
   select(Prey.species..lat., a_OL_FL = a, b_OL_FL = b)
 ```
 
 ## Join length regressions
 ```{r}
-data <- data %>%
-  left_join(reg_OW_FL, by = "Prey.species..lat.") %>%
+data <- data |>
+  left_join(reg_OW_FL, by = "Prey.species..lat.") |>
   left_join(reg_OL_FL, by = "Prey.species..lat.")
 ## Ensure numeric otolith values
-data <- data %>%
+data <- data |>
   mutate(
     Otolith.width..mm.   = as.numeric(Otolith.width..mm.),
     Otolith.length...mm. = as.numeric(Otolith.length...mm.)
@@ -80,7 +80,7 @@ data <- data %>%
 ## Calculate fish length (FL_not_corrected)
 
 ```{r}
-data <- data %>%
+data <- data |>
   mutate(
     FL_not_corrected = case_when(
       !is.na(Otolith.width..mm.) &
@@ -100,32 +100,32 @@ data <- data %>%
 ## Prepare weight regressions
 
 ```{r}
-reg_OW_FW <- reg_FW %>%
-  filter(Goal_unit == "Weight (FW)", Count_variabel == "OW") %>%
+reg_OW_FW <- reg_FW |>
+  filter(Goal_unit == "Weight (FW)", Count_variabel == "OW") |>
   select(Prey.species..lat., a_OW_FW = a, b_OW_FW = b, Regression_OW = Regression)
 
-reg_OL_FW <- reg_FW %>%
-  filter(Goal_unit == "Weight (FW)", Count_variabel == "OL") %>%
+reg_OL_FW <- reg_FW |>
+  filter(Goal_unit == "Weight (FW)", Count_variabel == "OL") |>
   select(Prey.species..lat., a_OL_FW = a, b_OL_FW = b, Regression_OL = Regression)
 
-reg_FL_FW <- reg_FW %>%
-  filter(Goal_unit == "Weight (FW)", Count_variabel == "FL") %>%
+reg_FL_FW <- reg_FW |>
+  filter(Goal_unit == "Weight (FW)", Count_variabel == "FL") |>
   select(Prey.species..lat., a_FL_FW = a, b_FL_FW = b, Regression_FL = Regression)
 ```
 
 ## Join weight regressions
 
 ```{r}
-data <- data %>%
-  left_join(reg_OW_FW, by = "Prey.species..lat.") %>%
-  left_join(reg_OL_FW, by = "Prey.species..lat.") %>%
+data <- data |>
+  left_join(reg_OW_FW, by = "Prey.species..lat.") |>
+  left_join(reg_OL_FW, by = "Prey.species..lat.") |>
   left_join(reg_FL_FW, by = "Prey.species..lat.")
 ```
 
 ## DEFINE AVAILABLE MEASURED FL
 
 ```{r}
-data <- data %>%
+data <- data |>
   mutate(
     all_FL_available_ok = case_when(
       Prey.remain %in% c("whole fish", "whole body", "whole individual") &
@@ -139,7 +139,7 @@ data <- data %>%
 ## CALCULATE FISH WEIGHT (FW_not_corrected)
 
 ```{r}
-data <- data %>%
+data <- data |>
   mutate(
     FW_not_corrected = case_when(
       
@@ -192,7 +192,7 @@ data <- data %>%
 ## Calculate abundance
 
 ```{r}
-data <- data %>%
+data <- data |>
   mutate(
     n = as.numeric(n),
     abundance = case_when(
@@ -211,7 +211,7 @@ data <- data %>%
 ## Calculate biomass
 
 ```{r}
-data <- data %>%
+data <- data |>
   mutate(
     biomass_not_corrected = FW_not_corrected * abundance
   )
@@ -235,32 +235,32 @@ summary(data$biomass_not_corrected)
 ```{r}
 ## --- Unique prey taxa in stomach data 
 
-prey_data <- data %>%
+prey_data <- data |>
   distinct(Prey.species..lat.)
 
 ## --- Available regressions: LENGTH 
 
-reg_length_available <- reg_FL %>%
-  filter(Goal_unit == "Lenght (FL)") %>%
+reg_length_available <- reg_FL |>
+  filter(Goal_unit == "Lenght (FL)") |>
   distinct(Prey.species..lat.)
 
 ## --- Available regressions: WEIGHT -----------------------
 
-reg_weight_available <- reg_FW %>%
-  filter(Goal_unit == "Weight (FW)") %>%
+reg_weight_available <- reg_FW |>
+  filter(Goal_unit == "Weight (FW)") |>
   distinct(Prey.species..lat.)
 
 ## --- Combine checks --------------------------------------
 
-regression_check <- prey_data %>%
+regression_check <- prey_data |>
   left_join(
-    reg_length_available %>% mutate(has_FL_regression = TRUE),
+    reg_length_available |> mutate(has_FL_regression = TRUE),
     by = "Prey.species..lat."
-  ) %>%
+  ) |>
   left_join(
-    reg_weight_available %>% mutate(has_FW_regression = TRUE),
+    reg_weight_available |> mutate(has_FW_regression = TRUE),
     by = "Prey.species..lat."
-  ) %>%
+  ) |>
   mutate(
     has_FL_regression = ifelse(is.na(has_FL_regression), FALSE, has_FL_regression),
     has_FW_regression = ifelse(is.na(has_FW_regression), FALSE, has_FW_regression)
@@ -268,7 +268,7 @@ regression_check <- prey_data %>%
 
 ## --- Summary flags 
 
-regression_check <- regression_check %>%
+regression_check <- regression_check |>
   mutate(
     missing_FL = !has_FL_regression,
     missing_FW = !has_FW_regression,
@@ -278,15 +278,15 @@ regression_check <- regression_check %>%
 ## --- RESULTS 
 
 ## Species missing ANY regression
-missing_any <- regression_check %>%
+missing_any <- regression_check |>
   filter(missing_FL | missing_FW)
 
 ## Species missing BOTH length and weight regressions
-missing_both <- regression_check %>%
+missing_both <- regression_check |>
   filter(missing_both)
 
 ## Species with full coverage
-complete_coverage <- regression_check %>%
+complete_coverage <- regression_check |>
   filter(!missing_FL & !missing_FW)
 
 ############################################
