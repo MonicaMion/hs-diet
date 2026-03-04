@@ -3071,6 +3071,7 @@ vertical-align: -.125em;
   <li><a href="#read-data" id="toc-read-data" class="nav-link" data-scroll-target="#read-data">Read data</a></li>
   <li><a href="#make-matrix" id="toc-make-matrix" class="nav-link" data-scroll-target="#make-matrix">Make matrix</a></li>
   <li><a href="#save-matrix" id="toc-save-matrix" class="nav-link" data-scroll-target="#save-matrix">Save matrix</a></li>
+  <li><a href="#check-matrix" id="toc-check-matrix" class="nav-link" data-scroll-target="#check-matrix">Check matrix</a></li>
   </ul>
 </nav>
 </div>
@@ -3126,16 +3127,12 @@ vertical-align: -.125em;
 <h1>Make matrix</h1>
 <div class="cell" data-layout-align="center">
 <div class="sourceCode cell-code" id="cb3"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a>matrix_data <span class="ot">&lt;-</span> data <span class="sc">%&gt;%</span></span>
-<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(<span class="sc">!</span><span class="fu">is.na</span>(biomass_not_corrected)) <span class="sc">%&gt;%</span>   <span class="co"># ← IMPORTANT</span></span>
-<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>  <span class="fu">group_by</span>(</span>
-<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>    Sample.ID,</span>
-<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>    Family</span>
-<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">%&gt;%</span></span>
-<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>  <span class="fu">summarise</span>(</span>
-<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>    <span class="at">sum_biomass_not_corrected =</span> <span class="fu">sum</span>(biomass_not_corrected, <span class="at">na.rm =</span> <span class="cn">TRUE</span>),</span>
-<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>    <span class="at">sum_abundance =</span> <span class="fu">ceiling</span>(<span class="fu">sum</span>(abundance, <span class="at">na.rm =</span> <span class="cn">TRUE</span>)),</span>
-<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a>    <span class="at">.groups =</span> <span class="st">&quot;drop&quot;</span></span>
-<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a>  )</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">filter</span>(<span class="sc">!</span><span class="fu">is.na</span>(biomass_not_corrected)) <span class="sc">%&gt;%</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>  <span class="fu">summarise</span>(</span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>    <span class="at">sum_biomass_not_corrected =</span> <span class="fu">sum</span>(biomass_not_corrected, <span class="at">na.rm =</span> <span class="cn">TRUE</span>),</span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>    <span class="at">sum_abundance =</span> <span class="fu">ceiling</span>(<span class="fu">sum</span>(abundance, <span class="at">na.rm =</span> <span class="cn">TRUE</span>)),</span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>    <span class="at">.by =</span> <span class="fu">c</span>(Year, Sample.ID, Family, LAT, LON)</span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>  )</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </div>
 </section>
 <section id="save-matrix" class="level1">
@@ -3146,7 +3143,9 @@ vertical-align: -.125em;
 <span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>  <span class="at">row.names =</span> <span class="cn">FALSE</span></span>
 <span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </div>
-<p>#Check matrix</p>
+</section>
+<section id="check-matrix" class="level1">
+<h1>Check matrix</h1>
 <div class="cell" data-layout-align="center">
 <div class="sourceCode cell-code" id="cb5"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="fu">summary</span>(matrix_data<span class="sc">$</span>sum_biomass_not_corrected)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output cell-output-stdout">
