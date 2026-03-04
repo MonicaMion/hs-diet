@@ -51,9 +51,9 @@ matrix_data <- data %>%
 # Save matrix
 ```{r}
 write.csv(
-  matrix_data,paste0(home, "/Data/HS_SKAG_matrix_biomass_abundance_filtered_ok.csv",
+  matrix_data,paste0(home, "/Data/HS_SKAG_matrix_biomass_abundance_filtered_ok.csv"),
   row.names = FALSE
-))
+)
 ```
 
 #Check matrix
