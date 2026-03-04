@@ -544,15 +544,7 @@ p8 |>
 
 p8 |> 
   pivot_longer(starts_with("zeta"), names_to = "var", values_to = "zeta") |> 
-  filter(var %in% c("zeta_s_family_fGadidae1", "zeta_s_family_fClupeidae1")) |> 
-  ggplot(aes(lon, lat, color = zeta)) + 
-  geom_point(size = 1) + 
-  facet_wrap(~var) +
-  scale_color_gradient2()
-
-p8 |> 
-  pivot_longer(starts_with("zeta"), names_to = "var", values_to = "zeta") |> 
-  filter(var %in% c("zeta_s_family_fGadidae2", "zeta_s_family_fClupeidae2")) |> 
+  filter(var %in% c("zeta_s_family_fGadidae", "zeta_s_family_fClupeidae")) |> 
   ggplot(aes(lon, lat, color = zeta)) + 
   geom_point(size = 1) + 
   facet_wrap(~var) +
@@ -706,19 +698,55 @@ p10b |>
 ```
 
 ```{r}
-# m9 <- sdmTMB(
-#   pw ~ 1 + family_f,
-#   data = d,
-#   time_varying = ~1,
-#   time_varying_type = "ar1",
-#   mesh = mesh,
-#   extra_time = 2023,
-#   time = "year",
-#   family = tweedie(link = "log"),
-#   spatial = "off",
-#   spatial_varying = ~0 + family_f,
-#   spatiotemporal = "off"
-# )
+m11 <- sdmTMB(
+  pw ~ 1 + family_f,
+  data = d,
+  time_varying = ~1 + family_f,
+  time_varying_type = "ar1",
+  mesh = mesh,
+  extra_time = 2023,
+  time = "year",
+  family = tweedie(link = "log"),
+  spatial = "on",
+  #spatial_varying = ~0 + family_f,
+  spatiotemporal = "off"
+)
+
+# Now family and time trends
+nd11 <- d |> 
+  distinct(family_f, year) |> 
+  bind_rows(d |> 
+              distinct(family_f) |> 
+              mutate(year = 2023)) |> 
+  mutate(year_sc = (year - mean(d$year)) / sd(d$year))
+  
+p11 <- predict(m11, newdata = nd11, se_fit = TRUE, re_form = NA) |> 
+  mutate(upr = est + 1.96*est_se,
+         lwr = est - 1.96*est_se)
+
+p11 |> 
+  summarise(est = mean(est),
+            upr = mean(upr),
+            lwr = mean(lwr), .by = family_f) |> 
+  ggplot(aes(exp(est), reorder(family_f, exp(est)))) + 
+  geom_point() + 
+  geom_errorbar(aes(xmin = exp(lwr), xmax = exp(upr)),
+                width = 0, alpha = 0.5)
+
+# Now plot the year-prediction
+p11 |> 
+  ggplot(aes(year, exp(est), color = family_f, fill = family_f)) + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = exp(lwr), ymax = exp(upr)),
+              alpha = 0.3, color = NA) +
+  facet_wrap(~family_f)
+
+p11 |> 
+  ggplot(aes(year, exp(est), color = family_f, fill = family_f)) + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = exp(lwr), ymax = exp(upr)),
+              alpha = 0.3, color = NA) +
+  facet_wrap(~family_f, scales = "free")
 ```
 
 How do these spatially-varying models stand against m2, fitted as a tweedie?
@@ -731,20 +759,16 @@ m2_tw <- sdmTMB(
   spatial = "off"
 )
 
-AIC(m2_tw, m8, m9, m10) |> 
+AIC(m2_tw, m8, m9, m10, m11) |> 
   arrange(AIC)
 ```
 
+## To do now
 
-Now, AIC says the model 2 is most parsimonious. It has a separate intercept for each year, and a separate intercept for each family.
+1. Make a regular grid, and make predictions from m8 or m9 (i think i prefer that one actually, even though it has +3 AIC...)
 
-I do think the AICs are not THAT far off. We definitely do not have to be so restrictive and dismiss spatial and/or ar1 models at this point, since they fit nicely. I also think it's nice to model the mean prey weight as a ar1 process, because its' more in line with how time series work (we do expect 2012 to be more similar to 2011). Also the clear spatial pattern in precense/absence warrants a deeper investigation.
+Follow up on:
+2. Can we estimate a spatiotemporal random field? (different spatial predictions every year?)
 
-A few things to follow up on: 
-
-1. Can we estimate a spatiotemporal random field? (different spatial predictions every year?)
-
-2. Can we estimate spatial variability in prey types? One way to do that is to model family as an intercept (like we do), and spatial deviation on top off that with spatial_varying = ~0 + family? Then we would have spatial differences in predicted diets, which we can relate to trawl data
-
-3. s(day, by = prey?)
+3. s(day, by = prey?)? This would allow for seasonal variation in prey!
 
