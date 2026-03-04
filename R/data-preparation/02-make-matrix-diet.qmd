@@ -40,8 +40,9 @@ matrix_data <- data %>%
   summarise(
     sum_biomass_not_corrected = sum(biomass_not_corrected, na.rm = TRUE),
     sum_abundance = ceiling(sum(abundance, na.rm = TRUE)),
-    .by = c(Year, Sample.ID, Family, LAT, LON)
-  )
+    .by = c(Year, Sample.ID, Family, LAT, LON, Months)
+  ) |> 
+  rename(Month = Months)
 ```
 
 # Save matrix
