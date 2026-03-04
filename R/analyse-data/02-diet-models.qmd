@@ -67,7 +67,7 @@ d <- d |>
       sum_abundance = 0
     )
   ) |>
-  fill(lat, lon, year, month, quarter, year_f, year_ct, month_f,
+  fill(lat, lon, year, month, year_f, year_ct, month_f,
        .direction = "downup") |> 
   ungroup()
 
@@ -88,7 +88,7 @@ d <- d |>
     pw = sum(pw),
     sum_abundance = sum(sum_abundance),
     .by = c(sample_id, family, lat, lon, year,
-            month, quarter, year_f, year_ct, month_f)
+            month, year_f, year_ct, month_f)
   )
 ```
 
@@ -111,8 +111,15 @@ d |>
 
 summary(d$pw)
 
-d |> 
-  filter(pw > 20000)
+# FIXME
+d <- d |> 
+  filter(pw < 10000)
+# > d |> 
+# +   filter(pw > 14000)
+# filter: removed 1,294 rows (>99%), one row remaining# A tibble: 1 × 11
+#   sample_id   family      lat   lon  year month year_f year_ct month_f     pw sum_abundance
+#   <chr>       <chr>     <dbl> <dbl> <dbl> <dbl> <fct>    <dbl> <fct>    <dbl>         <dbl>
+# 1 A2020/05589 Clupeidae  58.9  11.1  2016     1 2016         5 1       19748.            35
 
 ggplot(d, aes(pw)) + 
   geom_histogram()
@@ -286,7 +293,6 @@ p4 <- predict(m4, newdata = nd4, se_fit = TRUE) |>
   mutate(upr = est + 1.96*est_se,
          lwr = est - 1.96*est_se)
 
-# TODO: Based on the exploded uncertainty here, I would maybe play around with adding priors on the fixed effects...
 p4 |> 
   summarise(est = mean(est),
             upr = mean(upr),
@@ -459,6 +465,8 @@ p6 |>
               alpha = 0.3, color = NA)
 ```
 
+Spatial random _and_ time-varying intercept
+
 ```{r}
 #| warning: false
 #| message: false
@@ -476,14 +484,14 @@ m7 <- sdmTMB(
   spatiotemporal = "off"
 )
 
-
 # Plot spatial random effect?
 nd7 <- d |>
   distinct(X, Y, lon, lat) |> 
-  mutate(year_f = as.factor("2011"),
+  mutate(year = 2011, 
+         year_f = as.factor("2011"),
          family = as.factor("Gadidae"))
 
-p7 <- predict(m6, newdata = nd7, re_form_iid = NA)
+p7 <- predict(m7, newdata = nd7, re_form_iid = NA)
 
 p7
 
@@ -497,9 +505,236 @@ p7 |>
 It's a pretty clear pattern here, that the amount of prey in the stomachs declines with distance from coast!
 
 ```{r}
+# FIXME: this is the delta_gamma models!
 AIC(m1, m2, m3, m4, m5, m6, m7) |> 
   arrange(AIC)
 ```
+
+
+Now, we want the predation to change spatially with family. Spatial-varying effect of family!
+
+```{r}
+d$family_f <- as.factor(d$family)
+
+m8 <- sdmTMB(
+  pw ~ 0 + family_f + year_f,
+  data = d,
+  mesh = mesh,
+  #family = delta_gamma(type = "poisson-link"),
+  family = tweedie(link = "log"),
+  spatial = "off",
+  spatial_varying = ~0 + family_f
+)
+
+nd8 <- d |>
+  distinct(X, Y, lon, lat) |> 
+  mutate(year_f = as.factor("2011")) |> 
+  replicate_df(time_values = unique(d$family_f), time_name = "family_f")
+
+p8 <- predict(m8, newdata = nd8)
+
+names(p8)
+
+p8 |> 
+  pivot_longer(starts_with("zeta"), names_to = "var", values_to = "zeta") |> 
+  ggplot(aes(lon, lat, color = zeta)) + 
+  geom_point(size = 1) + 
+  facet_wrap(~var) +
+  scale_color_gradient2()
+
+p8 |> 
+  pivot_longer(starts_with("zeta"), names_to = "var", values_to = "zeta") |> 
+  filter(var %in% c("zeta_s_family_fGadidae1", "zeta_s_family_fClupeidae1")) |> 
+  ggplot(aes(lon, lat, color = zeta)) + 
+  geom_point(size = 1) + 
+  facet_wrap(~var) +
+  scale_color_gradient2()
+
+p8 |> 
+  pivot_longer(starts_with("zeta"), names_to = "var", values_to = "zeta") |> 
+  filter(var %in% c("zeta_s_family_fGadidae2", "zeta_s_family_fClupeidae2")) |> 
+  ggplot(aes(lon, lat, color = zeta)) + 
+  geom_point(size = 1) + 
+  facet_wrap(~var) +
+  scale_color_gradient2()
+```
+
+What if we do both time varying intercept and spatial varying family?
+
+```{r}
+m9 <- sdmTMB(
+  pw ~ 1 + family_f,
+  data = d,
+  time_varying = ~1,
+  time_varying_type = "ar1",
+  mesh = mesh,
+  extra_time = 2023,
+  time = "year",
+  family = tweedie(link = "log"),
+  spatial = "off",
+  spatial_varying = ~0 + family_f,
+  spatiotemporal = "off"
+)
+
+m9
+sanity(m9)
+
+nd9 <- d |>
+  distinct(X, Y, lon, lat) |> 
+  mutate(year = 2011, 
+         year_f = as.factor("2011")) |> 
+  replicate_df(time_values = unique(d$family_f), time_name = "family_f") |> 
+  droplevels()
+  
+p9 <- predict(m9, newdata = nd9, re_form_iid = NA)
+
+names(p9)
+
+p9 |> 
+  pivot_longer(starts_with("zeta"), names_to = "var", values_to = "zeta") |> 
+  ggplot(aes(lon, lat, color = zeta)) + 
+  geom_point(size = 1) + 
+  facet_wrap(~var) +
+  scale_color_gradient2()
+
+# Now family and time trends
+nd9b <- d |> 
+  distinct(family, year) |> 
+  bind_rows(d |> 
+              distinct(family) |> 
+              mutate(year = 2023))
+  
+p9b <- predict(m5, newdata = nd9b, se_fit = TRUE, re_form = NA) |> 
+  mutate(upr = est + 1.96*est_se,
+         lwr = est - 1.96*est_se)
+
+p9b |> 
+  summarise(est = mean(est),
+            upr = mean(upr),
+            lwr = mean(lwr), .by = family) |> 
+  ggplot(aes(exp(est), reorder(family, exp(est)))) + 
+  geom_point() + 
+  geom_errorbar(aes(xmin = exp(lwr), xmax = exp(upr)),
+                width = 0, alpha = 0.5)
+
+# Now plot the year-prediction
+p9b |> 
+  ggplot(aes(year, exp(est), color = family, fill = family)) + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = exp(lwr), ymax = exp(upr)),
+              alpha = 0.3, color = NA) +
+  facet_wrap(~family) 
+```
+
+One last thing to check: can we fit a model where the families have specific temporal trends?
+
+```{r}
+# simplest case is to have a year_f * family_f interaction... but its not efficient and doesnt converge!
+d$year_sc <- (d$year - mean(d$year)) / sd(d$year)
+
+m10 <- sdmTMB(
+  pw ~ 0 + family_f + s(year_sc, by = family_f, k = 3),
+  data = d,
+  mesh = mesh,
+  #family = delta_gamma(type = "poisson-link"),
+  family = tweedie(link = "log"),
+  spatial = "off",
+  spatial_varying = ~0 + family_f
+)
+
+sanity(m10)
+
+nd10 <- d |>
+  distinct(X, Y, lon, lat) |> 
+  mutate(year = 2011, 
+         year_sc = 0,
+         year_f = as.factor("2011")) |> 
+  replicate_df(time_values = unique(d$family_f), time_name = "family_f") |> 
+  droplevels()
+  
+p10 <- predict(m10, newdata = nd10, re_form_iid = NA)
+
+names(p10)
+
+p10 |> 
+  pivot_longer(starts_with("zeta"), names_to = "var", values_to = "zeta") |> 
+  ggplot(aes(lon, lat, color = zeta)) + 
+  geom_point(size = 1) + 
+  facet_wrap(~var) +
+  scale_color_gradient2()
+
+# Now family and time trends
+nd10b <- d |> 
+  distinct(family_f, year) |> 
+  bind_rows(d |> 
+              distinct(family_f) |> 
+              mutate(year = 2023)) |> 
+  mutate(year_sc = (year - mean(d$year)) / sd(d$year))
+  
+p10b <- predict(m10, newdata = nd10b, se_fit = TRUE, re_form = NA) |> 
+  mutate(upr = est + 1.96*est_se,
+         lwr = est - 1.96*est_se)
+
+p10b |> 
+  summarise(est = mean(est),
+            upr = mean(upr),
+            lwr = mean(lwr), .by = family_f) |> 
+  ggplot(aes(exp(est), reorder(family_f, exp(est)))) + 
+  geom_point() + 
+  geom_errorbar(aes(xmin = exp(lwr), xmax = exp(upr)),
+                width = 0, alpha = 0.5)
+
+# Now plot the year-prediction
+p10b |> 
+  ggplot(aes(year, exp(est), color = family_f, fill = family_f)) + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = exp(lwr), ymax = exp(upr)),
+              alpha = 0.3, color = NA) +
+  facet_wrap(~family_f)
+
+p10b |> 
+  ggplot(aes(year, exp(est), color = family_f, fill = family_f)) + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = exp(lwr), ymax = exp(upr)),
+              alpha = 0.3, color = NA) +
+  facet_wrap(~family_f, scales = "free")
+
+p10b |> 
+  ggplot(aes(year, exp(est), color = family_f, fill = family_f)) + 
+  geom_line() + 
+  facet_wrap(~family_f, scales = "free") 
+```
+
+```{r}
+# m9 <- sdmTMB(
+#   pw ~ 1 + family_f,
+#   data = d,
+#   time_varying = ~1,
+#   time_varying_type = "ar1",
+#   mesh = mesh,
+#   extra_time = 2023,
+#   time = "year",
+#   family = tweedie(link = "log"),
+#   spatial = "off",
+#   spatial_varying = ~0 + family_f,
+#   spatiotemporal = "off"
+# )
+```
+
+How do these spatially-varying models stand against m2, fitted as a tweedie?
+
+```{r}
+m2_tw <- sdmTMB(
+  pw ~ 0 + family + year_f,
+  data = d,
+  family = tweedie(),
+  spatial = "off"
+)
+
+AIC(m2_tw, m8, m9, m10) |> 
+  arrange(AIC)
+```
+
 
 Now, AIC says the model 2 is most parsimonious. It has a separate intercept for each year, and a separate intercept for each family.
 
