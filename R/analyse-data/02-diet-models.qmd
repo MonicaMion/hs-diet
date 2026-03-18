@@ -57,13 +57,13 @@ Now expand the data so that every predator has one row for each prey type (curre
 #| warning: false
 #| message: false
 
-# Expand the data
+# Expand the data: If a seal stomach contained Gadidae but not Clupeidae, we add a row for Clupeidae with pw = 0. This is necessary because we want to model the probability of eating each prey type AND how much of it.
 d <- d |>
   group_by(sample_id) |>
   complete(
     family,
     fill = list(
-      pw = 0,
+      pw = 0, 
       sum_abundance = 0
     )
   ) |>
@@ -128,19 +128,38 @@ ggplot(d, aes(month)) +
   geom_histogram()
 ```
 
+All models use the R package sdmTMB (Species Distribution Modelling with TMB). Think of it as a powerful toolbox that combines:
+
+GLMs (Generalized Linear Models) — for modelling non-normal data
+GAMs (Generalized Additive Models) — for smooth, nonlinear effects
+Spatial random fields — for capturing spatial patterns (like kriging in geostatistics)
+Time series — AR1 autoregressive processes
+
+Prey weight is a tricky variable: it has many zeros (seal didn't eat that prey family) and the positive values are right-skewed (most are small, a few are very large). Two approaches are used:
+
+Delta-gamma (delta_gamma(type = "poisson-link")): Fits two sub-models simultaneously:
+
+A binomial model for the probability of presence (did the seal eat this prey? yes/no)
+A gamma model for the positive amount (how much, given it ate it)
+The "poisson-link" means both sub-models share a log link, so their predictions can be simply added on the link scale.
+
+Tweedie (tweedie(link = "log")): A single distribution that naturally handles zeros and positive continuous values. Simpler but less flexible than delta-gamma.
+
 Fit a simple model, estimating the mean prey weight by family, ignoring space and time
+
 
 ```{r}
 #| warning: false
 #| message: false
 
+#m1: Baseline — "What is the average diet?"
 # Fit a simple model
 # Let's use a delta_gamma model to have a bit more flexibility than a tweedie
 m1 <- sdmTMB(
-  pw ~ 0 + family,
+  pw ~ 0 + family, # prey weight predicted by family only
   data = d,
   family = delta_gamma(type = "poisson-link"),
-  spatial = "off"
+  spatial = "off"  # no spatial effects
 )
 
 summary(m1)
@@ -175,15 +194,17 @@ res |>
 
 # It looks slightly better if you remove the uncommon families
 ```
+Gadidae has the highest average prey weight, followed by Clupeidae and then "other". The confidence intervals are quite wide for some families, especially the less common ones.
 
+m2: Adding year as a factor — "Does diet change between years?"
 Now add year to the model. There are many options for how. We'll look into a factor year, linear year and autoregressive year effects.
-
+It estimates a different overall prey level for each year, while keeping family effects. Each year gets its own intercept — no assumption about trend shape.
 ```{r}
 #| warning: false
 #| message: false
 
 m2 <- sdmTMB(
-  pw ~ 0 + family + year_f,
+  pw ~ 0 + family + year_f, # add a separate intercept for each year
   data = d,
   family = delta_gamma(type = "poisson-link"),
   spatial = "off"
@@ -206,7 +227,8 @@ p2 |>
   geom_errorbar(aes(xmin = exp(lwr), xmax = exp(upr)),
                 width = 0, alpha = 0.5)
 
-# Now plot the year-prediction
+# Now plot the year-prediction. The year-effect plot shows whether total prey 
+# weight goes up or down in particular years
 p2 |> 
   ggplot(aes(year, exp(est), color = family, fill = family)) + 
   geom_line() + 
@@ -214,7 +236,9 @@ p2 |>
               alpha = 0.3, color = NA) +
   facet_wrap(~family)
 
-# And now the total prey weight over time
+# And now the total prey weight over time. The family × year prediction plot 
+# shows year-by-year trends for each prey family, while the total prey weight 
+# plot shows the overall trend in prey weight over time, regardless of family.
 p2 |> 
   summarise(est = mean(est),
             upr = mean(upr),
@@ -226,7 +250,8 @@ p2 |>
 ```
 
 Linear year effect
-
+m3: Linear year trend — "Is there a long-term trend?". Fits a single straight 
+line through time. One slope parameter instead of one per year.
 ```{r}
 #| warning: false
 #| message: false
@@ -274,7 +299,12 @@ p3 |>
 ```
 
 Linear year effect but different slopes for each family
-
+m4: Family × year interaction — "Do different prey trend differently?" 
+This is a more complex model that allows each prey family to have its own linear
+trend over time. It includes an interaction between family and year, so we can 
+see if some prey types are increasing while others are decreasing.
+Allows each prey family to have a different linear trend over time. 
+E.g., Gadidae could be increasing while Clupeidae is decreasing.
 ```{r}
 #| warning: false
 #| message: false
@@ -321,10 +351,14 @@ p4 |>
               alpha = 0.3, color = NA)
 ```
 
-The interaction above explodes for some families..
+The interaction above explodes for some families..an interaction with few data 
+points leads to huge uncertainty.
 
 What if we wanted to model time for as a time series, using an autoregressive approach?
-
+m5: AR1 time-varying intercept — "Are there autocorrelated year effects?"
+Instead of treating each year independently (m2) or assuming a straight line (m3), 
+it models the year effect as an autoregressive process: each year's effect is a 
+function of the previous year's effect, plus some noise.
 ```{r}
 #| warning: false
 #| message: false
@@ -399,13 +433,21 @@ AIC(m1, m2, m3, m4, m5) |>
 ```
 
 Now testing adding spatial random effects
-
+m6: Adding spatial random effects — "Does diet vary by location?"
+Adds a spatial random field (a "map" of random effects) to account for the fact
+that seals in nearby locations tend to have similar diets. 
+Uses a mesh (a triangulation of sampling locations) to define spatial structure.
 ```{r}
 #| warning: false
 #| message: false
 
 d <- d |> 
   add_utm_columns(ll_names = c("lon", "lat"))
+
+#The mesh is a triangulated network over the study area. 
+#The model estimates a smooth spatial surface by estimating values at mesh 
+#vertices and interpolating between them. cutoff = 4 means vertices must be at 
+#least 4 km apart.
 
 mesh <- make_mesh(d, xy_cols = c("X", "Y"), type = "cutoff", cutoff = 4)
 
@@ -466,6 +508,9 @@ p6 |>
 ```
 
 Spatial random _and_ time-varying intercept
+m7: Spatial + AR1 time-varying — "Spatial and temporal effects together"
+Combines the spatial field from m6 with the AR1 temporal process from m5. 
+The spatial field is constant across years — it captures permanent spatial patterns.
 
 ```{r}
 #| warning: false
@@ -512,7 +557,10 @@ AIC(m1, m2, m3, m4, m5, m6, m7) |>
 
 
 Now, we want the predation to change spatially with family. Spatial-varying effect of family!
-
+m8: Spatially-varying family effects — "Do different areas favour different prey?"
+Instead of one spatial field for all prey combined, each prey family gets its own spatial field. 
+This models the idea that, say, Gadidae might be more important near the coast 
+while Clupeidae dominates offshore.
 ```{r}
 d$family_f <- as.factor(d$family)
 
@@ -549,10 +597,16 @@ p8 |>
   geom_point(size = 1) + 
   facet_wrap(~var) +
   scale_color_gradient2()
+
+#The zeta columns are the spatially-varying coefficients. 
+#Each zeta_s_family_fXXX is a map showing where that prey family's contribution 
+#is positively or negatively shifted relative to the mean.
+#Positive zeta = that family has higher-than-average prey weight in that area
+#Negative zeta = lower-than-average
 ```
 
 What if we do both time varying intercept and spatial varying family?
-
+m9: Spatially-varying family + AR1 intercept — "Spatial and temporal effects together, with family-specific spatial patterns"
 ```{r}
 m9 <- sdmTMB(
   pw ~ 1 + family_f,
@@ -591,35 +645,35 @@ p9 |>
 
 # Now family and time trends
 nd9b <- d |> 
-  distinct(family, year) |> 
+  distinct(family_f, year) |> 
   bind_rows(d |> 
-              distinct(family) |> 
+              distinct(family_f) |> 
               mutate(year = 2023))
   
-p9b <- predict(m5, newdata = nd9b, se_fit = TRUE, re_form = NA) |> 
+p9b <- predict(m9, newdata = nd9b, se_fit = TRUE, re_form = NA) |> 
   mutate(upr = est + 1.96*est_se,
          lwr = est - 1.96*est_se)
 
 p9b |> 
   summarise(est = mean(est),
             upr = mean(upr),
-            lwr = mean(lwr), .by = family) |> 
-  ggplot(aes(exp(est), reorder(family, exp(est)))) + 
+            lwr = mean(lwr), .by = family_f) |> 
+  ggplot(aes(exp(est), reorder(family_f, exp(est)))) + 
   geom_point() + 
   geom_errorbar(aes(xmin = exp(lwr), xmax = exp(upr)),
                 width = 0, alpha = 0.5)
 
 # Now plot the year-prediction
 p9b |> 
-  ggplot(aes(year, exp(est), color = family, fill = family)) + 
+  ggplot(aes(year, exp(est), color = family_f, fill = family_f)) + 
   geom_line() + 
   geom_ribbon(aes(ymin = exp(lwr), ymax = exp(upr)),
               alpha = 0.3, color = NA) +
-  facet_wrap(~family) 
+  facet_wrap(~family_f) 
 ```
 
 One last thing to check: can we fit a model where the families have specific temporal trends?
-
+m10: GAM smooth year trends by family + spatial-varying coefficients
 ```{r}
 # simplest case is to have a year_f * family_f interaction... but its not efficient and doesnt converge!
 d$year_sc <- (d$year - mean(d$year)) / sd(d$year)
@@ -697,6 +751,8 @@ p10b |>
   facet_wrap(~family_f, scales = "free") 
 ```
 
+m11: Family-specific AR1 time-varying effects + spatial
+Each prey family gets its own time-varying intercept (AR1). So Gadidae can have a different temporal trajectory than Clupeidae.
 ```{r}
 m11 <- sdmTMB(
   pw ~ 1 + family_f,
@@ -766,6 +822,252 @@ AIC(m2_tw, m8, m9, m10, m11) |>
 ## To do now
 
 1. Make a regular grid, and make predictions from m8 or m9 (i think i prefer that one actually, even though it has +3 AIC...)
+
+Question: What does the spatial map of predicted prey weight actually look like?
+
+All previous spatial models made predictions at observed sampling locations only (the dots where seals were caught). This script creates predictions on a regular grid, producing smooth, map-like visualisations.
+
+```{r}
+#Create a regular prediction grid
+#    We build a grid in UTM space covering the sampled extent, then
+#    convert back to lon/lat for plotting.
+# Define grid resolution (km in UTM)
+grid_res <- 1  # 1 km resolution
+
+# Grid in UTM
+x_range <- range(d$X)
+y_range <- range(d$Y)
+
+grid_utm <- expand.grid(
+  X = seq(x_range[1] - 2, x_range[2] + 2, by = grid_res),
+  Y = seq(y_range[1] - 2, y_range[2] + 2, by = grid_res)
+)
+
+cat("Grid cells:", nrow(grid_utm), "\n")
+# Convert UTM back to lon/lat for plotting
+# sdmTMB uses zone from add_utm_columns; we reverse it
+# The UTM zone is stored as an attribute
+utm_zone <- attr(d, "crs")
+if (is.null(utm_zone)) {
+  # Fallback: determine from median longitude
+  utm_zone <- floor((median(d$lon) + 180) / 6) + 1
+  cat("Estimated UTM zone:", utm_zone, "\n")
+}
+
+# Use sf for back-conversion
+if (requireNamespace("sf", quietly = TRUE)) {
+  grid_sf <- sf::st_as_sf(grid_utm, coords = c("X", "Y"),
+                           crs = sf::st_crs(paste0("+proj=utm +zone=", 
+                                                    utm_zone, " +datum=WGS84")))
+  grid_ll <- sf::st_transform(grid_sf, crs = 4326)
+  coords_ll <- sf::st_coordinates(grid_ll)
+  grid_utm$lon <- coords_ll[, 1]
+  grid_utm$lat <- coords_ll[, 2]
+} else {
+  # Approximate back-conversion if sf not available
+  cat("sf package not available; using approximate lon/lat from linear interpolation\n")
+  grid_utm$lon <- approx(d$X, d$lon, xout = grid_utm$X)$y
+  grid_utm$lat <- approx(d$Y, d$lat, xout = grid_utm$Y)$y
+}
+
+# Trim grid to approximate convex hull of sampling locations
+# to avoid extrapolating far beyond the data
+if (requireNamespace("sf", quietly = TRUE)) {
+  hull <- sf::st_convex_hull(
+    sf::st_union(
+      sf::st_as_sf(d, coords = c("X", "Y"), crs = sf::st_crs(paste0("+proj=utm +zone=", utm_zone, " +datum=WGS84")))
+    )
+  )
+  # Buffer slightly (5 km)
+  hull_buf <- sf::st_buffer(hull, dist = 5000)
+  grid_sf_trim <- sf::st_as_sf(grid_utm, coords = c("X", "Y"),
+                                crs = sf::st_crs(paste0("+proj=utm +zone=", utm_zone, " +datum=WGS84")))
+  inside <- sf::st_intersects(grid_sf_trim, hull_buf, sparse = FALSE)[, 1]
+  grid_utm <- grid_utm[inside, ]
+  cat("Grid cells after trimming to hull:", nrow(grid_utm), "\n")
+}
+
+```
+
+Predict on the grid using m9 (spatial + family-specific spatial effects)
+```{r}
+
+m9 <- sdmTMB(
+  pw ~ 1 + family_f,
+  data = d,
+  time_varying = ~1,
+  time_varying_type = "ar1",
+  mesh = mesh,
+  extra_time = 2023,
+  time = "year",
+  family = tweedie(link = "log"),
+  spatial = "off",
+  spatial_varying = ~0 + family_f,
+  spatiotemporal = "off"
+)
+
+sanity(m9)
+```
+
+Spatial predictions per family from m9
+Predict on the regular grid for a representative year.
+
+```{r}
+# Create prediction data: replicate grid for each family
+nd_spatial <- grid_utm |>
+  mutate(year = 2020) |>   # representative year
+  replicate_df(time_values = unique(d$family_f), time_name = "family_f") |>
+  droplevels()
+
+p_spatial <- predict(m9, newdata = nd_spatial, re_form_iid = NA)
+
+# Plot spatially-varying coefficients (zeta) per family
+zeta_cols <- grep("^zeta_s_", names(p_spatial), value = TRUE)
+
+if (length(zeta_cols) > 0) {
+  p_spatial |>
+    pivot_longer(all_of(zeta_cols), names_to = "var", values_to = "zeta") |>
+    # Clean up variable names for labels
+    mutate(var = str_remove(var, "zeta_s_family_f")) |>
+    ggplot(aes(lon, lat, color = zeta)) +
+    geom_point(size = 0.5) +
+    facet_wrap(~var) +
+    scale_color_gradient2(
+      low = "blue", mid = "white", high = "red",
+      midpoint = 0, name = "Spatial\ncoefficient"
+    ) +
+    coord_sf() +
+    labs(title = "Spatially-varying prey family coefficients (m9)",
+         subtitle = "Positive = higher prey weight in that area",
+         x = "Longitude", y = "Latitude")
+
+  # Individual maps for key families
+  for (fam in c("Gadidae", "Clupeidae")) {
+    zeta_var <- paste0("zeta_s_family_f", fam)
+    if (zeta_var %in% names(p_spatial)) {
+      p_plot <- p_spatial |>
+        filter(family_f == fam) |>
+        distinct(lon, lat, .data[[zeta_var]])
+
+      print(
+        ggplot(p_plot, aes(lon, lat, color = .data[[zeta_var]])) +
+          geom_point(size = 1.5) +
+          scale_color_gradient2(
+            low = "blue", mid = "white", high = "red",
+            midpoint = 0, name = "Spatial\ncoefficient"
+          ) +
+          coord_sf() +
+          labs(title = paste("Spatial coefficient —", fam, "(m9)"),
+               x = "Longitude", y = "Latitude")
+      )
+    }
+  }
+}
+```
+
+
+Combined prediction map (total prey weight)
+
+```{r}
+# Predicted prey weight on response scale
+p_spatial <- p_spatial |>
+  mutate(pw_pred = exp(est))
+
+# Total prey weight across all families
+total_map <- p_spatial |>
+  summarise(total_pw = sum(pw_pred), .by = c(lon, lat, X, Y))
+
+ggplot(total_map, aes(lon, lat, color = total_pw)) +
+  geom_point(size = 1) +
+  scale_color_viridis_c(option = "plasma", name = "Total\nprey wt (g)") +
+  coord_sf() +
+  labs(title = "Total predicted prey weight — spatial map (m9, year 2020)",
+       x = "Longitude", y = "Latitude") +
+  # Overlay observed sampling locations
+  geom_point(data = d |> distinct(lon, lat),
+             aes(lon, lat), color = "grey30", shape = 3, size = 0.5,
+             inherit.aes = FALSE)
+
+# Per-family maps
+p_spatial |>
+  ggplot(aes(lon, lat, color = pw_pred)) +
+  geom_point(size = 0.5) +
+  facet_wrap(~family_f) +
+  scale_color_viridis_c(option = "plasma", name = "Prey wt (g)",
+                         trans = "log1p") +
+  coord_sf() +
+  labs(title = "Predicted prey weight by family — spatial map (m9)",
+       x = "Longitude", y = "Latitude")
+
+```
+
+Re-fit m8 (simpler spatial-varying, no time-varying intercept)
+and predict on the grid for comparison
+
+```{r}
+m8 <- sdmTMB(
+  pw ~ 0 + family_f + year_f,
+  data = d,
+  mesh = mesh,
+  family = tweedie(link = "log"),
+  spatial = "off",
+  spatial_varying = ~0 + family_f
+)
+
+sanity(m8)
+
+nd_m8 <- grid_utm |>
+  mutate(year_f = as.factor("2020")) |>
+  replicate_df(time_values = unique(d$family_f), time_name = "family_f") |>
+  droplevels()
+
+p_m8 <- predict(m8, newdata = nd_m8, re_form_iid = NA) |>
+  mutate(pw_pred = exp(est))
+
+# Total prey weight map from m8
+total_m8 <- p_m8 |>
+  summarise(total_pw = sum(pw_pred), .by = c(lon, lat))
+
+ggplot(total_m8, aes(lon, lat, color = total_pw)) +
+  geom_point(size = 1) +
+  scale_color_viridis_c(option = "plasma", name = "Total\nprey wt (g)") +
+  coord_sf() +
+  labs(title = "Total predicted prey weight — m8 (year 2020)",
+       x = "Longitude", y = "Latitude")
+
+```
+
+Spatial maps over time: Multi-year spatial predictions from m8
+
+```{r}
+# Select representative years
+key_years <- c(2012, 2016, 2020, 2024)
+key_years <- key_years[key_years %in% unique(d$year)]
+
+if (length(key_years) > 1) {
+  nd_years <- grid_utm |>
+    replicate_df(time_values = as.character(key_years), time_name = "year_f") |>
+    mutate(year_f = as.factor(year_f)) |>
+    replicate_df(time_values = unique(d$family_f), time_name = "family_f") |>
+    droplevels()
+
+  p_years <- predict(m8, newdata = nd_years, re_form_iid = NA) |>
+    mutate(pw_pred = exp(est),
+           year = as.numeric(as.character(year_f)))
+
+  # Total prey weight by year
+  total_years <- p_years |>
+    summarise(total_pw = sum(pw_pred), .by = c(lon, lat, year))
+
+  ggplot(total_years, aes(lon, lat, color = total_pw)) +
+    geom_point(size = 0.5) +
+    facet_wrap(~year) +
+    scale_color_viridis_c(option = "plasma", name = "Total\nprey wt (g)") +
+    coord_sf() +
+    labs(title = "Total predicted prey weight across years (m8)",
+         x = "Longitude", y = "Latitude")
+}
+```
 
 Follow up on:
 2. Can we estimate a spatiotemporal random field? (different spatial predictions every year?)
