@@ -1,0 +1,307 @@
+---
+title: "Survey Fish Availability: Distribution Maps"
+author: "Monica Mion & Max Lindmark"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format: 
+  html:
+    toc: true
+    page-layout: full
+    embed-resources: true
+knitr: 
+  opts_chunk:
+    fig.align: center
+    out-width: 80%
+editor: source
+execute: 
+  echo: true
+  eval: true
+  cache: false
+---
+
+## Purpose
+
+The modelling choice is deliberately simple:
+
+- restrict to Q3 only,
+- do not include year effects,
+- do not include quarter effects,
+- compare a non-spatial model to a spatial model,
+- map the best-supported Q3 spatial surface.
+
+
+## Load libraries
+
+```{r}
+#| message: false
+#| warning: false
+library(tidyverse)
+library(sdmTMB)
+library(viridis)
+library(sf)
+library(sp)
+library(terra)
+
+theme_set(theme_light())
+
+home <- here::here()
+```
+
+## Read family data
+
+```{r}
+dat <- read_csv(paste0(home, "/Data/survey/survey_family_model_data.csv"), show_col_types = FALSE) |>
+  mutate(
+    survey = factor(survey),
+    quarter = factor(quarter),
+    family = factor(family)
+  )
+```
+
+## Restrict to quarter 3
+
+```{r}
+#| echo: false
+dat_q3 <- dat |>
+  filter(quarter == 3)
+
+dat_q3 |>
+  distinct(haul_id, survey, year) |>
+  count(survey)
+```
+
+This restriction removes the main survey-quarter confounding problem and keeps the comparison focused on the period where both surveys sample the system.
+
+## Family support in quarter 3
+
+```{r}
+#| echo: false
+family_support <- dat_q3 |>
+  group_by(family) |>
+  summarise(
+    total = sum(catch_kg_km2),
+    n_hauls = n_distinct(haul_id),
+    zero_rate = mean(catch_kg_km2 == 0),
+    surveys = paste(sort(unique(survey)), collapse = ", "),
+    .groups = "drop"
+  ) |>
+  arrange(desc(total))
+
+family_support
+```
+
+## Families selected for mapping
+
+We focus on:
+
+- Gadidae joint IBTS + CTS Q3 map
+- Pleuronectidae joint IBTS + CTS Q3 map
+- Clupeidae IBTS-only Q3 map
+
+## Build a prediction grid
+
+```{r}
+#| echo: false
+haul_pts <- dat_q3 |>
+  distinct(haul_id, survey, X, Y, lat, lon)
+
+x <- haul_pts$X
+y <- haul_pts$Y
+z <- chull(x, y)
+coords <- cbind(x[z], y[z])
+coords <- rbind(coords, coords[1, ])
+
+sp_poly <- sp::SpatialPolygons(
+  list(sp::Polygons(list(sp::Polygon(coords)), ID = 1))
+)
+sp_poly_df <- sp::SpatialPolygonsDataFrame(sp_poly, data = data.frame(ID = 1))
+
+cell_width <- 2
+
+pred_grid <- expand.grid(
+  X = seq(min(haul_pts$X), max(haul_pts$X), cell_width),
+  Y = seq(min(haul_pts$Y), max(haul_pts$Y), cell_width)
+)
+
+sp::coordinates(pred_grid) <- c("X", "Y")
+inside <- !is.na(sp::over(pred_grid, as(sp_poly_df, "SpatialPolygons")))
+pred_grid <- as.data.frame(pred_grid[inside, ])
+
+xy <- as.matrix(pred_grid |> select(X, Y) |> mutate(X = X * 1000, Y = Y * 1000))
+v <- terra::vect(xy, crs = "+proj=utm +zone=33 +datum=WGS84 +units=m")
+ll <- terra::project(v, "+proj=longlat +datum=WGS84")
+pred_grid$lon <- terra::geom(ll)[, "x"]
+pred_grid$lat <- terra::geom(ll)[, "y"]
+pred_grid$quarter <- factor(3, levels = levels(dat_q3$quarter))
+pred_grid$survey <- factor("IBTS", levels = levels(dat_q3$survey))
+```
+
+## Prediction grid check
+
+```{r}
+#| echo: false
+ggplot(pred_grid, aes(X, Y)) +
+  geom_point(size = 0.1) +
+  coord_equal() +
+  labs(
+    title = "Prediction grid",
+    subtitle = "2 x 2 km grid inside the convex hull of Q3 hauls",
+    x = "UTM Easting (km)",
+    y = "UTM Northing (km)"
+  )
+```
+
+## Helper functions
+
+```{r}
+fit_q3_models <- function(d, use_survey = TRUE) {
+  mesh <- make_mesh(d, xy_cols = c("X", "Y"), cutoff = 5)
+
+  if (use_survey) {
+    formula <- catch_kg_km2 ~ survey
+  } else {
+    formula <- catch_kg_km2 ~ 1
+  }
+
+  m1 <- sdmTMB(
+    formula,
+    data = d,
+    mesh = mesh,
+    family = tweedie(link = "log"),
+    spatial = "off",
+    spatiotemporal = "off",
+    anisotropy = FALSE
+  )
+
+  m2 <- sdmTMB(
+    formula,
+    data = d,
+    mesh = mesh,
+    family = tweedie(link = "log"),
+    spatial = "on",
+    spatiotemporal = "off",
+    anisotropy = FALSE
+  )
+
+  list(mesh = mesh, m1 = m1, m2 = m2)
+}
+
+get_aic_table <- function(model_list) {
+  AIC(model_list$m1, model_list$m2) |>
+    as_tibble(rownames = "model") |>
+    arrange(AIC)
+}
+
+plot_family_surface <- function(pred, title, subtitle) {
+  ggplot(pred, aes(X, Y, fill = est)) +
+    geom_raster() +
+    coord_equal() +
+    scale_fill_viridis_c() +
+    labs(
+      title = title,
+      subtitle = subtitle,
+      x = "UTM Easting (km)",
+      y = "UTM Northing (km)",
+      fill = "kg/km2"
+    )
+}
+```
+
+## Gadidae: Q3 distribution map
+
+```{r}
+#| echo: false
+gadidae_dat <- dat_q3 |>
+  filter(family == "Gadidae")
+
+gadidae_models <- fit_q3_models(gadidae_dat, use_survey = TRUE)
+get_aic_table(gadidae_models)
+```
+
+```{r}
+#| echo: false
+sanity(gadidae_models$m2)
+```
+
+```{r}
+#| echo: false
+plot(gadidae_models$mesh$mesh, asp = 1)
+gad_pts <- gadidae_dat |> distinct(haul_id, X, Y)
+points(gad_pts$X, gad_pts$Y, pch = 16, cex = 0.3, col = scales::alpha("black", 0.4))
+```
+
+```{r}
+#| echo: false
+pred_gadidae <- pred_grid |>
+  mutate(survey = factor("IBTS", levels = levels(gadidae_dat$survey)))
+
+gadidae_pred <- predict(gadidae_models$m2, newdata = pred_gadidae)
+
+plot_family_surface(
+  gadidae_pred,
+  title = "Gadidae distribution in Q3",
+  subtitle = "Spatial Tweedie model; IBTS reference surface"
+)
+```
+
+## Pleuronectidae: Q3 distribution map
+
+```{r}
+#| echo: false
+pleur_dat <- dat_q3 |>
+  filter(family == "Pleuronectidae")
+
+pleur_models <- fit_q3_models(pleur_dat, use_survey = TRUE)
+get_aic_table(pleur_models)
+```
+
+```{r}
+#| echo: false
+sanity(pleur_models$m2)
+```
+
+```{r}
+#| echo: false
+pred_pleur <- pred_grid |>
+  mutate(survey = factor("IBTS", levels = levels(pleur_dat$survey)))
+
+pleur_pred <- predict(pleur_models$m2, newdata = pred_pleur)
+
+plot_family_surface(
+  pleur_pred,
+  title = "Pleuronectidae distribution in Q3",
+  subtitle = "Spatial Tweedie model; IBTS reference surface"
+)
+```
+
+## Clupeidae: Q3 IBTS-only map
+
+```{r}
+#| echo: false
+clup_dat <- dat_q3 |>
+  filter(family == "Clupeidae", survey == "IBTS")
+
+clup_models <- fit_q3_models(clup_dat, use_survey = FALSE)
+get_aic_table(clup_models)
+```
+
+```{r}
+#| echo: false
+sanity(clup_models$m2)
+```
+
+```{r}
+#| echo: false
+clup_pred <- predict(clup_models$m2, newdata = pred_grid)
+
+plot_family_surface(
+  clup_pred,
+  title = "Clupeidae distribution in Q3 (IBTS only)",
+  subtitle = "Spatial Tweedie model"
+)
+```
+
+## Next step
+
+1. add ICES/land background layers to these maps,
+2. compare these Q3 family maps to harbour seal diet composition,
+3. build a species-level Q3 version for cod, whiting, haddock, plaice, and herring.

@@ -1,0 +1,494 @@
+---
+title: "Survey fish availability: CTS and IBTS exploration"
+author: "Monica Mion & Max Lindmark"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format: 
+  html:
+    toc: true
+    page-layout: full
+    embed-resources: true
+knitr: 
+  opts_chunk:
+    fig.align: center
+    out-width: 80%
+editor: source
+execute: 
+  echo: true
+  eval: true
+  cache: false
+---
+
+## Purpose
+
+This notebook explores the cleaned fish-survey data before any modelling.
+
+The main goals are to:
+
+- understand what IBTS and coastal trawl surveys sample in space and time
+- identify the dominant fish families and species
+- decide which families and species are suitable for spatiotemporal modelling
+
+
+## Load libraries
+
+```{r}
+#| message: false
+#| warning: false
+library(tidyverse)
+library(sf)
+library(RColorBrewer)
+library(scales)
+library(patchwork)
+library(rnaturalearth)
+
+theme_set(theme_light())
+
+home <- here::here()
+```
+
+## Read cleaned survey data
+
+```{r}
+family_dat <- read_csv(paste0(home, "/Data/survey/survey_family_model_data.csv"), show_col_types = FALSE)
+species_dat <- read_csv(paste0(home, "/Data/survey/survey_species_model_data.csv"), show_col_types = FALSE)
+
+family_dat
+species_dat
+
+```
+
+## Key data note
+
+Clupeidae are treated differently from the other families:
+- they are well represented in IBTS, but they are not reliably recorded in the 
+coastal survey (CTS).
+
+This means:
+
+- CTS Clupeidae values should not be interpreted as real zeros,
+- Clupeidae must be modelled using IBTS only,
+- joint IBTS + CTS models are appropriate for families that are recorded in both 
+surveys, such as Gadidae and Pleuronectidae.
+
+## Quick dataset summary
+
+```{r}
+list(
+  family_rows = nrow(family_dat),
+  species_rows = nrow(species_dat),
+  n_hauls = n_distinct(family_dat$haul_id),
+  family_levels = sort(unique(family_dat$family)),
+  year_range = range(family_dat$year),
+  quarters = sort(unique(family_dat$quarter)),
+  surveys = sort(unique(family_dat$survey))
+)
+```
+
+## Sampling coverage in time
+
+```{r}
+haul_counts <- family_dat |>
+  distinct(haul_id, year, quarter, survey) |>
+  count(year, quarter, survey)
+
+ggplot(haul_counts, aes(year, n, fill = survey)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~quarter, ncol = 1) +
+  scale_fill_brewer(palette = "Dark2") +
+  labs(
+    title = "Number of hauls by year, quarter, and survey",
+    x = "Year",
+    y = "Number of hauls",
+    fill = "Survey"
+  )
+```
+
+CTS is done in Q3, while IBTS in Q1 and Q3
+
+
+
+```{r}
+#| echo: false #do not show when rendering, but keep in source for interactive exploration
+#| message: false
+#| warning: false
+
+#Spatial coverage example for 2023
+map_2023 <- family_dat |>
+  distinct(haul_id, year, survey, lat, lon) |>
+  filter(year == 2023)
+
+ices_areas <- st_read(
+  paste0(home, "/Data/shapefiles/ICES_areas/ICES_Areas_20160601_cut_dense_3857.shp"),
+  quiet = TRUE
+)
+
+ices_crs <- st_crs("EPSG:3857")
+
+# Land — crop first in degrees, then reproject
+world <- ne_countries(scale = "medium", returnclass = "sf")
+world_crop <- st_crop(world, c(xmin = 8, xmax = 13, ymin = 56, ymax = 60))
+world_crop_3857 <- st_transform(world_crop, crs = ices_crs)
+
+# Reproject ICES and crop to land extent
+ices_areas_3857 <- st_transform(ices_areas, crs = ices_crs)
+ices_crop_3857  <- st_crop(ices_areas_3857, st_bbox(world_crop_3857))
+xlim_3857 <- st_bbox(ices_crop_3857)[c("xmin", "xmax")]
+ylim_3857 <- st_bbox(ices_crop_3857)[c("ymin", "ymax")]
+
+# Union land and create 50 km coastal buffer
+land_union <- st_union(world_crop_3857)
+land_50km  <- st_buffer(land_union, dist = 50000)
+
+# Survey points
+pts_2023 <- st_as_sf(map_2023, coords = c("lon", "lat"), crs = 4326)
+pts_3857  <- st_transform(pts_2023, crs = ices_crs)
+
+# Map — all stations as circles, coloured by survey
+ggplot() +
+  geom_sf(data = land_50km, aes(fill = "50 km coastal buffer"),
+          alpha = 0.3, colour = "steelblue", linewidth = 0.3) +
+  geom_sf(data = world_crop_3857, fill = "grey85", colour = NA) +
+  geom_sf(data = ices_crop_3857, fill = NA, colour = "grey50", linewidth = 0.3) +
+  geom_sf(data = pts_3857, aes(colour = survey), size = 3, alpha = 0.8, shape = 20) +
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_manual(values = "lightblue1", guide = guide_legend(order = 1)) +
+  coord_sf(
+    xlim = xlim_3857,
+    ylim = ylim_3857,
+    expand = FALSE
+  ) +
+  labs(
+    title = "Survey stations in 2023",
+    x = NULL, y = NULL,
+    colour = "Survey",
+    fill = NULL
+  ) +
+  theme_light() +
+  theme(
+    panel.background = element_rect(fill = "white", colour = NA),
+    legend.position = "bottom"
+  )
+
+```
+
+
+## Spatial coverage through time
+
+```{r}
+#| message: false
+#| warning: false
+map_all <- family_dat |>
+  distinct(haul_id, year, survey, lat, lon)
+
+ices_areas <- st_read(
+  paste0(home, "/Data/shapefiles/ICES_areas/ICES_Areas_20160601_cut_dense_3857.shp"),
+  quiet = TRUE
+)
+
+ices_crs <- st_crs("EPSG:3857")
+
+# Land — crop first in degrees, then reproject
+world <- ne_countries(scale = "medium", returnclass = "sf")
+world_crop <- st_crop(world, c(xmin = 8, xmax = 13, ymin = 56, ymax = 60))
+world_crop_3857 <- st_transform(world_crop, crs = ices_crs)
+
+# Reproject ICES and crop to land extent
+ices_areas_3857 <- st_transform(ices_areas, crs = ices_crs)
+ices_crop_3857  <- st_crop(ices_areas_3857, st_bbox(world_crop_3857))
+
+# Union land and create 50 km coastal buffer
+land_union <- st_union(world_crop_3857)
+land_50km  <- st_buffer(land_union, dist = 50000)
+
+# Survey points
+pts_all <- st_as_sf(map_all, coords = c("lon", "lat"), crs = 4326)
+pts_all_3857 <- st_transform(pts_all, crs = ices_crs)
+
+# Map with facets by year
+ggplot() +
+  geom_sf(data = land_50km, aes(fill = "50 km coastal buffer"),
+          alpha = 0.3, colour = "steelblue", linewidth = 0.3) +
+  geom_sf(data = world_crop_3857, fill = "grey85", colour = NA) +
+  geom_sf(data = ices_crop_3857, fill = NA, colour = "grey50", linewidth = 0.3) +
+  geom_sf(data = pts_all_3857, aes(colour = survey), size = 1.8, alpha = 0.7, shape = 20) +
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_manual(values = "lightblue1", guide = guide_legend(order = 1)) +
+  coord_sf(
+    xlim = xlim_3857,
+    ylim = ylim_3857,
+    expand = FALSE
+  ) +
+  facet_wrap(~year, ncol = 4) +
+  labs(
+    title = "Survey stations by year",
+    x = NULL, y = NULL,
+    colour = "Survey",
+    fill = NULL
+  ) +
+  theme_light() +
+  theme(
+    panel.background = element_rect(fill = "white", colour = NA),
+    legend.position = "bottom",
+    strip.background = element_blank(),
+    strip.text = element_text(colour = "black", face = "bold", size = 10)
+  )
+
+```
+
+## Family-level composition
+
+```{r}
+family_share <- family_dat |>
+  group_by(survey, family) |>
+  summarise(total = sum(catch_kg_km2), .groups = "drop_last") |>
+  mutate(prop = total / sum(total)) |>
+  ungroup()
+
+ggplot(family_share, aes(survey, prop, fill = family)) +
+  geom_col() +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+   # title = "Family composition by survey",
+    x = "Survey",
+    y = "Weight proportion (%)",
+    fill = "Family"
+  )
+```
+
+
+## Family-level yearly composition
+
+```{r}
+family_share_year <- family_dat |>
+  group_by(year, survey, family) |>
+  summarise(total = sum(catch_kg_km2), .groups = "drop_last") |>
+  mutate(prop = total / sum(total)) |>
+  ungroup()
+
+ggplot(family_share_year, aes(as.factor(year), prop, fill = family)) +
+  geom_col() +
+  facet_wrap(~survey, ncol = 1) +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+   # title = "Family composition through time",
+    x = "Year",
+    y = "Weight proportion (%)",
+    fill = "Family"
+  )
+```
+
+# Family weight proportion by year, quarter and survey
+```{r}
+family_share <- family_dat |>
+  mutate(survey_quarter = paste(survey, "Q", quarter, sep = "")) |>
+  group_by(year, survey_quarter, family) |>
+  summarise(total = sum(catch_kg_km2), .groups = "drop_last") |>
+  mutate(prop = total / sum(total)) |>
+  ungroup()
+
+ggplot(family_share, aes(survey_quarter, prop, fill = family)) +
+  geom_col(position = "stack") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Set2") +
+  facet_wrap(~year) +
+  labs(
+    #title = "Family weight proportion by year, quarter and survey",
+    x = NULL,
+    y = "Weight proportion (%)",
+    fill = "Family"
+  ) +
+  theme_light() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.background = element_rect(fill = "white", colour = "grey90")
+  )
+
+```
+
+
+## Zero rates by family
+
+```{r}
+family_zero <- family_dat |>
+  group_by(survey, family) |>
+  summarise(zero_rate = mean(catch_kg_km2 == 0), .groups = "drop")
+
+ggplot(family_zero, aes(family, zero_rate, fill = survey)) +
+  geom_col(position = "dodge") +
+  scale_y_continuous(labels = percent_format()) +
+  scale_fill_brewer(palette = "Dark2") +
+  labs(
+    title = "Zero rate by family and survey",
+    subtitle = "High zero rates suggest patchier occurrence and may favour delta models",
+    x = "Family",
+    y = "Proportion of zero catches",
+    fill = "Survey"
+  ) +
+  coord_flip()
+```
+
+## Interpretation
+
+- Families with very low zero rates are nearly always present when recorded.
+- Families with high zero rates may be patchier and more difficult to model.
+Gadidae and Pleuronectidae are strong candidates because they are common and broadly observed.
+
+## Family-level mean density by year
+
+```{r}
+family_mean <- family_dat |>
+  group_by(year, survey, family) |>
+  summarise(mean_catch = mean(catch_kg_km2), .groups = "drop")
+
+family_mean |>
+  ggplot(aes(as.factor(year), mean_catch,
+              colour = family, group = family)) +
+  geom_line() +
+  geom_point(size = 1.2) +
+  facet_wrap(~survey, scales = "free_y") +
+  scale_color_brewer(palette = "Set2") +
+  labs(
+    x = "Year",
+    y = "Mean catch_kg_km2",
+    colour = "Family"
+  )
+
+```
+
+## Species-level support
+
+```{r}
+top_species <- species_dat |>
+  group_by(species, family) |>
+  summarise(
+    total = sum(catch_kg_km2),
+    n_hauls = n_distinct(haul_id),
+    .groups = "drop"
+  ) |>
+  arrange(desc(total))
+
+top_species |> slice_head(n = 20)
+```
+
+## Species-level composition
+
+```{r}
+top_species_names <- top_species |> slice_head(n = 12) |> pull(species)
+
+species_share <- species_dat |>
+  filter(species %in% top_species_names) |>
+  group_by(survey, species) |>
+  summarise(total = sum(catch_kg_km2), .groups = "drop_last") |>
+  mutate(prop = total / sum(total)) |>
+  ungroup()
+
+ggplot(species_share, aes(survey, prop, fill = species)) +
+  geom_col() +
+  scale_y_continuous(labels = percent_format()) +
+  labs(
+    title = "Top species composition by survey",
+    subtitle = "Restricted to the 12 most abundant species",
+    x = "Survey",
+    y = "Share of total catch density",
+    fill = "Species"
+  )
+```
+
+
+## Species-level mean density by year
+
+```{r}
+top_species_names <- top_species |> slice_head(n = 12) |> pull(species)
+species_dat |>
+  filter(species %in% top_species_names) |>
+  group_by(survey, species) |>
+  summarise(total = sum(catch_kg_km2), .groups = "drop_last") |>
+  mutate(species = reorder(species, total)) |>
+  ggplot(aes(species, total, fill = survey)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  scale_fill_brewer(palette = "Dark2") +
+  labs(
+    title = "Total catch density by species and survey",
+    x = "Species",
+    y = expression(Catch ~ (kg ~ km^{-2})),
+    fill = "Survey"
+  )
+
+top_species_names <- top_species |> slice_head(n = 12) |> pull(species)
+
+  species_share <- species_dat |>
+ filter(species %in% top_species_names) |>
+  group_by(survey, species) |>
+  summarise(total = sum(catch_kg_km2), .groups = "drop_last") |>
+  mutate(prop = total / sum(total)) |>
+  ungroup()
+
+species_mean <- species_dat |>
+  group_by(year, survey, quarter, family, species) |>
+  summarise(mean_catch = mean(catch_kg_km2), .groups = "drop")
+
+
+species_mean |>
+  mutate(
+    family  = factor(family,  levels = c("Gadidae", "Clupeidae", "Pleuronectidae", "Carangidae", "Scombridae", "Squalidae")),
+    species = factor(species, levels = top_species_names)
+  ) |>
+  filter(species %in% top_species_names) |>
+  ggplot(aes(as.factor(year), mean_catch,
+              colour = as.factor(quarter),
+              linetype = survey,
+              group = interaction(survey, quarter))) +
+  geom_line() +
+  geom_point(size = 1.2) +
+  facet_wrap(~ family + species, ncol = 3, scales = "free_y") +
+  #scale_y_log10() +
+  scale_color_brewer(palette = "Set2") +
+  labs(
+    title = "Mean species-level catch density through time",
+    x = "Year",
+    y = "Mean catch_kg_km2",
+    colour = "Quarter",
+    linetype = "Survey"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(colour = "black", face = "bold")
+  )
+
+```
+## Candidate targets for modelling
+
+```{r}
+family_candidates <- family_dat |>
+  group_by(family) |>
+  summarise(
+    total = sum(catch_kg_km2),
+    n_hauls = n_distinct(haul_id),
+    zero_rate = mean(catch_kg_km2 == 0),
+    surveys = paste(sort(unique(survey)), collapse = ", "),
+    .groups = "drop"
+  ) |>
+  arrange(desc(total))
+
+family_candidates
+```
+
+
+```{r}
+species_candidates <- species_dat |>
+  group_by(species, family) |>
+  summarise(
+    total = sum(catch_kg_km2),
+    n_hauls = n_distinct(haul_id),
+    years = n_distinct(year),
+    surveys = paste(sort(unique(survey)), collapse = ", "),
+    .groups = "drop"
+  ) |>
+  arrange(desc(total))
+
+species_candidates |> slice_head(n = 20)
+```
+

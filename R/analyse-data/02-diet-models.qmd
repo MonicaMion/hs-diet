@@ -31,6 +31,8 @@ library(ggeffects)
 library(sdmTMB)
 library(modelr)
 library(readr)
+library(sf)
+library(rnaturalearth)
 
 home <- here::here()
 ```
@@ -449,7 +451,7 @@ d <- d |>
 #vertices and interpolating between them. cutoff = 4 means vertices must be at 
 #least 4 km apart.
 
-mesh <- make_mesh(d, xy_cols = c("X", "Y"), type = "cutoff", cutoff = 4)
+mesh <- make_mesh(d, xy_cols = c("X", "Y"), type = "cutoff", cutoff = 3)
 
 plot(mesh)
 
@@ -484,7 +486,7 @@ p6 |>
             upr = mean(upr),
             lwr = mean(lwr), .by = family) |> 
   ggplot(aes(exp(est), reorder(family, exp(est)))) + 
-  geom_point() + 
+  geom_point() +
   geom_errorbar(aes(xmin = exp(lwr), xmax = exp(upr)),
                 width = 0, alpha = 0.5)
 
@@ -922,47 +924,39 @@ nd_spatial <- grid_utm |>
 p_spatial <- predict(m9, newdata = nd_spatial, re_form_iid = NA)
 
 # Plot spatially-varying coefficients (zeta) per family
-zeta_cols <- grep("^zeta_s_", names(p_spatial), value = TRUE)
-
-if (length(zeta_cols) > 0) {
-  p_spatial |>
+p_long <- p_spatial |>
     pivot_longer(all_of(zeta_cols), names_to = "var", values_to = "zeta") |>
     # Clean up variable names for labels
-    mutate(var = str_remove(var, "zeta_s_family_f")) |>
-    ggplot(aes(lon, lat, color = zeta)) +
-    geom_point(size = 0.5) +
-    facet_wrap(~var) +
-    scale_color_gradient2(
-      low = "blue", mid = "white", high = "red",
-      midpoint = 0, name = "Spatial\ncoefficient"
+    mutate(var = str_remove(var, "zeta_s_family_f"))
+
+ggplot(p_long, aes(X, Y, fill = zeta)) +
+  geom_raster() +
+  facet_wrap(~var) +
+  scale_fill_gradient2(
+    name = "Spatial\n Random effect"
     ) +
-    coord_sf() +
-    labs(title = "Spatially-varying prey family coefficients (m9)",
-         subtitle = "Positive = higher prey weight in that area",
-         x = "Longitude", y = "Latitude")
+  coord_sf(crs = 32632)  +
+  labs(title = "Spatially-varying prey family coefficients (m9)",
+       subtitle = "Positive = higher prey weight in that area",
+       x = "Easting", y = "Northing")
 
-  # Individual maps for key families
-  for (fam in c("Gadidae", "Clupeidae")) {
-    zeta_var <- paste0("zeta_s_family_f", fam)
-    if (zeta_var %in% names(p_spatial)) {
-      p_plot <- p_spatial |>
-        filter(family_f == fam) |>
-        distinct(lon, lat, .data[[zeta_var]])
+# add countries!
+world <- ne_countries(scale = "medium", returnclass = "sf")
+world_utm <- world %>% st_transform(crs = 32632)
 
-      print(
-        ggplot(p_plot, aes(lon, lat, color = .data[[zeta_var]])) +
-          geom_point(size = 1.5) +
-          scale_color_gradient2(
-            low = "blue", mid = "white", high = "red",
-            midpoint = 0, name = "Spatial\ncoefficient"
-          ) +
-          coord_sf() +
-          labs(title = paste("Spatial coefficient —", fam, "(m9)"),
-               x = "Longitude", y = "Latitude")
-      )
-    }
-  }
-}
+plot(world_utm)
+
+ggplot() +
+  geom_sf(data = world_utm, fill = NA) +
+  coord_sf(xlim = c(min(p_long$X*0.95), max(p_long$X*1.05)),
+           ylim = c(min(p_long$Y*0.99), max(p_long$Y*1.01)), 
+           crs = 32632, expand = 0) +
+  geom_raster(data = p_long %>% filter(var == "Gadidae"),
+              aes(X, Y, fill = zeta)) +
+  scale_fill_gradient2(
+    name = "Spatial\nRandom effect"
+    ) +
+  labs(title = paste("Spatial coefficient —", fam, "(m9)"))
 ```
 
 
@@ -1069,6 +1063,68 @@ if (length(key_years) > 1) {
 }
 ```
 
+```{r}
+d$cos_var <- cos(2*pi*d$month/12)
+d$sin_var <- sin(2*pi*d$month/12)
+d$Q_f <- as.factor(ceiling(d$month/3))
+m13 <- sdmTMB(
+   pw ~ 0 + family_f + Q_f,
+  data = d,
+  mesh = mesh,
+  family = tweedie(link = "log"),
+  spatial = "on",
+  spatial_varying = ~0 + family_f
+)
+
+m13
+sanity(m13)
+
+nd9 <- d |>
+  distinct(X, Y, lon, lat) |> 
+  mutate(year = 2011, 
+         year_f = as.factor("2011")) |> 
+  replicate_df(time_values = unique(d$family_f), time_name = "family_f") |> 
+  droplevels()
+  
+p9 <- predict(m9, newdata = nd9, re_form_iid = NA)
+
+names(p9)
+
+p9 |> 
+  pivot_longer(starts_with("zeta"), names_to = "var", values_to = "zeta") |> 
+  ggplot(aes(lon, lat, color = zeta)) + 
+  geom_point(size = 1) + 
+  facet_wrap(~var) +
+  scale_color_gradient2()
+
+# Now family and time trends
+nd9b <- d |> 
+  distinct(family_f, year) |> 
+  bind_rows(d |> 
+              distinct(family_f) |> 
+              mutate(year = 2023))
+  
+p9b <- predict(m9, newdata = nd9b, se_fit = TRUE, re_form = NA) |> 
+  mutate(upr = est + 1.96*est_se,
+         lwr = est - 1.96*est_se)
+
+p9b |> 
+  summarise(est = mean(est),
+            upr = mean(upr),
+            lwr = mean(lwr), .by = family_f) |> 
+  ggplot(aes(exp(est), reorder(family_f, exp(est)))) + 
+  geom_point() + 
+  geom_errorbar(aes(xmin = exp(lwr), xmax = exp(upr)),
+                width = 0, alpha = 0.5)
+
+# Now plot the year-prediction
+p9b |> 
+  ggplot(aes(year, exp(est), color = family_f, fill = family_f)) + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = exp(lwr), ymax = exp(upr)),
+              alpha = 0.3, color = NA) +
+  facet_wrap(~family_f) 
+```
 Follow up on:
 2. Can we estimate a spatiotemporal random field? (different spatial predictions every year?)
 

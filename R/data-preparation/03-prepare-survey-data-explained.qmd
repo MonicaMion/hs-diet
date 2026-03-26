@@ -1,0 +1,404 @@
+---
+title: "Survey data preparation"
+author: "Max Lindmark & Monica Mion"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format: 
+  html:
+    toc: true
+    page-layout: full
+    embed-resources: true
+knitr: 
+  opts_chunk:
+    fig.align: center
+    out-width: 80%
+editor: source
+execute: 
+  echo: true
+  eval: true
+  cache: false
+---
+
+## Load libraries
+
+```{r}
+#| message: false
+library(tidyverse)
+library(sf)
+
+  home <- here::here()
+
+species_family_path <- paste0(home, "/Data/survey/species_family.csv")
+ibts_path <- paste0(home, "/Data/survey/Species Per Fishing Operation_IBTS_1999-2026.csv")
+ct_path <- paste0(home, "/Data/survey/coast_trawl_2013_2024.csv")
+out_path <- paste0(home, "/Data/survey/survey_family_model_data.csv")
+species_out_path <- paste0(home, "/Data/survey/survey_species_model_data.csv")
+```
+
+# PART 1: The Two Surveys
+
+**Time span we use:** 2013–2024 (the overlap with the coastal trawl).
+
+**Known issue:** IBTS: The Swept area (km2) column is sometimes missing. When it is, we estimate it using the distance towed × door spread of the GOV net (standard GOV geometry: distance in nautical miles × 1.852 × 0.0862 km²).
+
+CTS: Coordinates are in degrees-minutes format (e.g. "5837.859" means 58°37.859'). We must convert these to decimal degrees (e.g. 58.631°) before using them.
+
+# PART 3: The Species → Family lookup Table
+
+## STEP 1: Load the lookup table
+Taxonomic list to add column family from species names. This is the same file used in the seal diet analysis, so we can be sure the family names match.
+
+```{r}
+species_family <- read_csv(species_family_path)
+```
+
+## STEP 2: Load IBTS data
+
+```{r}
+ibts_raw <- read_csv(ibts_path)
+```
+
+------------------------------------------------------------------------
+
+## STEP 3: Process IBTS
+
+### 3a. Filter to what we actually need
+
+```{r}
+ibts_filt <- ibts_raw |>
+  filter(
+    `Station validity` == "Valid",   # Only valid hauls
+    Subdiv == 20,                    # Only Skagerrak (not North Sea)
+    Year >= 2013, Year <= 2024       # Overlap years with CTS
+  )
+```
+
+This removes: Invalid or incomplete hauls, Hauls outside the Skagerrak, Years outside 2013–2024
+
+### 3b. Calculate swept area
+
+```{r}
+ibts_filt <- ibts_filt |>
+  mutate(
+    year = Year,
+    quarter = Quarter,
+    lat = `Lat. stop dec`,
+    lon = `Long. stop dec`,
+    swept_area = coalesce(
+      `Swept area (km2)`,           # Use the existing column if available
+      `Dist (Nm)` * 1.852 * 0.0862  # Else estimate: distance × conversion factor
+    )
+  )
+```
+
+coalesce() means: *"use the first value that is not NA; if it IS NA, use the second value."*
+
+
+### 3c. Keep only hauls with valid swept area
+
+```{r}
+haul_meta <- ibts_filt |>
+  filter(!is.na(swept_area), swept_area > 0, !is.na(lat), !is.na(lon)) |>
+  distinct(year, quarter, Vessel, `Trip number`, Haul, lat, lon)
+```
+
+### 3d. Normalize species names
+
+```{r}
+ibts_filt <- ibts_filt |>
+  mutate(specname_norm = tolower(gsub(" ", "_", `Specname sci.`)))
+```
+This step makes species taxonomic file and survey match.
+
+### 3e. Map species → family
+
+```{r}
+ibts_filt <- ibts_filt |>
+  left_join(species_family, by = c("specname_norm" = "specname_sci"))
+```
+
+For each row in IBTS, we look up what family the species belongs to. 
+
+### 3f. Calculate catch density
+
+This means: *"How many kilograms of fish were found per square kilometre of seabed?"*
+
+```{r}
+ibts_filt <- ibts_filt |>
+  mutate(catch_kg_km2 = `Catch weight (kg)` / swept_area)
+```
+
+This means: *"How many kilograms of fish were found per square kilometre of seabed?"*
+
+This is important because a 30-minute haul covers more area than a 10-minute haul. Raw catch weight would be misleading — longer hauls would always show more fish just because they sampled more seabed. Density normalises for this.
+
+### 3g. Aggregate to haul × family level
+
+```{r}
+ibts_haul <- ibts_filt |>
+  filter(!is.na(family)) |>
+  group_by(Year, Quarter, `Trip number`, Haul, Vessel,
+           `Lat. stop dec`, `Long. stop dec`, family) |>
+  summarise(catch_kg_km2 = sum(catch_kg_km2, na.rm = TRUE),
+            .groups = "drop")
+```
+
+**What this does:** A single haul can catch multiple species of the same family. We sum them all up so we have **one row per haul per family**.
+
+For example, a haul might catch: - 2 kg of cod (*Gadus morhua*, family = Gadidae) - 1.5 kg of haddock (*Melanogrammus aeglefinus*, family = Gadidae) - 0.5 kg of whiting (*Merlangius merlangus*, family = Gadidae)
+
+After aggregation: - **Gadidae: 4 kg/km²** (sum of all three) - Clupeidae: 0 (nothing from that family) - etc.
+
+### 3h. Create a unique haul ID
+
+```{r}
+ibts_haul <- ibts_haul |>
+  mutate(
+    haul_id = paste(Year, Quarter, Vessel, `Trip number`, Haul,
+                    round(`Lat. stop dec`, 4), round(`Long. stop dec`, 4), sep = "_")
+  )
+```
+
+We create a text label that uniquely identifies each haul: e.g. `"2019_3_SEPI_15_35_58.1234_11.5678"`. This is crucial for: - Joining IBTS and CTS data together later - Zero-filling (see Step 8) - Keeping track of hauls in the model
+
+------------------------------------------------------------------------
+
+## STEP 4 & 5: Load and Process Coast Trawl (CTS)
+
+The CTS processing follows the same logic but with some differences:
+
+### 4a. Convert deg-min coordinates to decimal degrees
+
+```{r}
+convert_dm <- function(x) {
+  x <- as.character(x)
+  deg  <- as.numeric(substr(x, 1, 2))
+  mins <- as.numeric(substr(x, 3, nchar(x)))
+  deg + mins / 60
+}
+```
+
+The CTS file has coordinates in a weird format: `"5837.859"` means 58°37.859'.
+
+Math: `58 + 37.859/60 = 58.631°`
+
+We apply this function to the `Lat` and `Long` columns.
+
+### 4b. Load and filter valid rows
+
+```{r}
+ct_raw <- read_csv(ct_path)
+
+ct_filt <- ct_raw |>
+  filter(Validity == "V", Year >= 2013, Year <= 2024) |>
+  mutate(lat = convert_dm(Lat), lon = convert_dm(Long))
+```
+
+### 4c. Drop rows with missing kg_km2
+
+```{r}
+ct_filt <- ct_filt |>
+  filter(!is.na(kg_km2), !is.na(lat), !is.na(lon))
+```
+
+Some species (like *Nephrops*) don't have length measurements → no weight → `kg_km2` is NA. These can't be used.
+
+### 4d. Join species → family
+
+```{r}
+ct_filt <- ct_filt |>
+  mutate(species = tolower(gsub(" ", "_", Scientific))) |>
+  left_join(species_family, by = c("species" = "specname_sci")) |>
+  filter(!is.na(family))
+```
+
+### 4e. Aggregate to haul × family
+
+```{r}
+ct_haul <- ct_filt |>
+
+  group_by(Year, Quarter, Index, Haul, Station.name,
+           lat, lon, Vattentyp, family) |>
+  summarise(catch_kg_km2 = sum(kg_km2, na.rm = TRUE),
+            .groups = "drop")
+```
+
+The CTS data has **one row per haul per species per length class**. A single haul at FLADEN might have 5 rows for the same species at different sizes. We sum them all up.
+
+------------------------------------------------------------------------
+
+## STEP 6: Combine Both Surveys
+
+We combine species-level data from both surveys, then immediately aggregate to
+family level for the spatial modelling pipeline.
+
+**Species-level:** one row per haul × species (used for species analysis)
+**Family-level:** one row per haul × family (used for family analysis and sdmTMB)
+
+```{r}
+surv <- bind_rows(
+  ibts_filt |>
+    filter(!is.na(family)) |>
+    mutate(
+      survey  = "IBTS",
+      species = specname_norm,
+      year    = Year,
+      quarter = Quarter,
+      haul_id = paste(Year, Quarter, Vessel, `Trip number`, Haul,
+                      round(`Lat. stop dec`, 4), round(`Long. stop dec`, 4), sep = "_")
+    ) |>
+    select(year, quarter, haul_id, survey, lat, lon, species, family, catch_kg_km2),
+  ct_filt |>
+    filter(!is.na(family)) |>
+    mutate(
+      survey       = "CTS",
+      catch_kg_km2 = kg_km2,
+      year         = Year,
+      quarter      = Quarter,
+      haul_id = paste(Year, Quarter, Index, Haul,
+                      round(lat, 4), round(lon, 4), sep = "_")
+    ) |>
+    select(year, quarter, haul_id, survey, lat, lon, species, family, catch_kg_km2)
+)
+
+surv_fam <- surv |>
+  group_by(haul_id, year, quarter, survey, lat, lon, family) |>
+  summarise(catch_kg_km2 = sum(catch_kg_km2, na.rm = TRUE), .groups = "drop")
+```
+
+We add a `Survey` column: "IBTS" for the international survey, "CTS" for the coastal survey.
+
+------------------------------------------------------------------------
+
+## STEP 7: Convert to UTM Coordinates
+
+Apply to family-level data for the spatial modelling pipeline:
+
+```{r}
+surv_fam_sf <- st_as_sf(surv_fam, coords = c("lon", "lat"), crs = 4326, remove = FALSE)
+surv_fam_sf <- st_transform(surv_fam_sf, crs = 32633)
+utm_coords  <- st_coordinates(surv_fam_sf)
+surv_fam <- surv_fam |>
+  mutate(X = round(utm_coords[, 1] / 1000, 3),
+         Y = round(utm_coords[, 2] / 1000, 3))
+```
+
+**Why UTM?** sdmTMB needs coordinates in a projected coordinate system (not lat/lon). We use **UTM Zone 33** (EPSG:32633), which is the appropriate projection for the Skagerrak area.
+
+-   `st_as_sf()`: turns the data into a spatial object with lat/lon coordinates
+-   `st_transform()`: converts to UTM Zone 33
+-   `st_coordinates()`: extracts the new X, Y values
+-   `/ 1000`: converts metres → kilometres (sdmTMB prefers km)
+
+**What do X and Y mean?** - **X** = Easting (horizontal distance from the UTM origin, in km) - **Y** = Northing (vertical distance from the UTM origin, in km)
+
+Together, (X, Y) pinpoints each haul on a flat map — which is what sdmTMB needs to model spatial patterns.
+
+## STEP 7b: Save Species-Level Dataset
+
+`surv` now has species-level rows with individual species records. We add factor columns
+and save to disk. Zero-filling (next step) only applies to the family-level analysis.
+
+For species-level UTM coordinates, we transform separately:
+
+```{r}
+surv_sf <- st_as_sf(surv, coords = c("lon", "lat"), crs = 4326, remove = FALSE)
+surv_sf <- st_transform(surv_sf, crs = 32633)
+utm_sp  <- st_coordinates(surv_sf)
+
+surv_species <- surv |>
+  mutate(X = round(utm_sp[, 1] / 1000, 3),
+         Y = round(utm_sp[, 2] / 1000, 3)) |>
+  mutate(
+    year_f    = as.factor(year),
+    year_ct   = year - min(year),
+    quarter_f = as.factor(quarter),
+    survey_f  = as.factor(survey),
+    family_f  = as.factor(family),
+    species_f = as.factor(species)
+  ) |>
+  select(haul_id, year, year_f, year_ct, quarter, quarter_f,
+         survey, survey_f, lat, lon, X, Y,
+         species, species_f, family, family_f, catch_kg_km2)
+
+write_csv(surv_species, species_out_path)
+```
+
+------------------------------------------------------------------------
+
+## STEP 8: Zero-Fill
+
+First, define the full list of families observed in the data:
+
+```{r}
+all_families <- sort(unique(surv_fam$family))
+```
+
+Then expand so every haul has one row per family:
+
+```{r}
+surv_zf <- surv_fam |>
+  group_by(haul_id) |>
+  complete(family = all_families, fill = list(catch_kg_km2 = 0)) |>
+  fill(year, quarter, survey, lat, lon, X, Y, .direction = "downup") |>
+  ungroup()
+```
+
+sdmTMB needs every haul to have data for every family. A "0" means "this family was looked for but not found", it's different from "missing data."
+
+This is exactly what the seal diet analysis already does (see `01-explore-data.R`), and it's standard practice in species distribution modelling.
+
+------------------------------------------------------------------------
+
+## STEP 9: Group Rare Families
+
+We calculate what **percentage** of total fish biomass each family represents. Families contributing less than **3%** are grouped into "Other".
+
+```{r}
+total_bm <- sum(surv_zf$catch_kg_km2, na.rm = TRUE)
+fam_share <- surv_zf |>
+  group_by(family) |>
+  summarise(fam_total = sum(catch_kg_km2, na.rm = TRUE), .groups = "drop") |>
+  mutate(pct = 100 * fam_total / total_bm) |>
+  arrange(desc(pct))
+
+rare_families <- fam_share |>
+  filter(pct < 3) |>
+  pull(family)
+
+surv_zf <- surv_zf |>
+  mutate(family = if_else(family %in% rare_families, "Other", family)) |>
+  group_by(haul_id, year, quarter, survey, lat, lon, X, Y, family) |>
+  summarise(catch_kg_km2 = sum(catch_kg_km2, na.rm = TRUE), .groups = "drop")
+```
+
+
+
+## STEP 10: Final Data Types
+
+```{r}
+surv_final <- surv_zf |>
+  mutate(
+    year_f     = as.factor(year),
+    year_ct    = year - min(year),
+    quarter_f  = as.factor(quarter),
+    survey_f   = as.factor(survey),
+    family_f   = as.factor(family),
+    catch_kg_km2 = replace_na(catch_kg_km2, 0)
+  ) |>
+  select(haul_id, year, year_f, year_ct, quarter, quarter_f,
+         survey, survey_f, lat, lon, X, Y, family, family_f, catch_kg_km2)
+```
+
+We make sure all columns have the right data type for sdmTMB:
+
+------------------------------------------------------------------------
+
+## STEP 11: Save
+
+The species-level dataset was saved earlier (step 3g). The family-level dataset
+is saved here:
+
+```{r}
+write_csv(surv_final, out_path)
+```
+
