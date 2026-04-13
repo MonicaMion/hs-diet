@@ -1,0 +1,738 @@
+---
+title: "Harbour Seal Diet Family Models"
+author: "Max Lindmark & Monica Mion"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format:
+  html:
+    toc: true
+    page-layout: full
+    embed-resources: true
+editor: source
+execute:
+  echo: true
+  eval: true
+  warning: false
+  message: false
+  cache: false
+---
+
+## Purpose
+
+This notebook builds a dedicated prey-family modelling pipeline for the harbour seal diet data.
+
+The workflow is:
+
+-   retain colonies through Onsala only,
+-   retain Faeces and Hunt samples only,
+-   build a sample-by-family modelling table with zero expansion,
+-   use 2013-2025 as the main analysis period, previous period too few samples restricted in time space and just scats. The early years remain available in the filtered metadata and can be used later for a sensitivity appendix if needed.
+-   model prey biomass by family with collection_method and family-specific smooth year effects
+
+```{r setup}
+library(dplyr)
+library(tidyr)
+library(readr)
+library(readxl)
+library(ggplot2)
+library(forcats)
+library(stringr)
+library(janitor)
+library(sf)
+library(sdmTMB)
+library(purrr)
+
+theme_set(theme_light())
+
+home <- here::here()
+
+biomass_file <- file.path(home, "Data", "HS_SKAG_estimated_abundance_biomass_130426.csv")
+ices_areas_file <- file.path(home, "Data", "shapefiles", "ICES_areas", "ICES_Areas_20160601_cut_dense_3857.shp")
+
+colony_keep <- c("Koster", "Lysekil", "Marstrand", "Onsala")
+method_keep <- c("Faeces", "Hunt")
+analysis_year_min <- 2013L
+dominant_families <- c("Gadidae", "Clupeidae", "Pleuronectidae", "Gobiidae")
+mesh_cutoff_km <- 3
+grid_res_km <- 2
+
+normalize_colony_name <- function(x) {
+  x <- trimws(as.character(x))
+  case_when(
+    grepl("der.*arna", x, ignore.case = TRUE) ~ "Väderöarna",
+    grepl("^Hallands.*der", x, ignore.case = TRUE) ~ "Hallands Väderö",
+    TRUE ~ x
+  )
+}
+
+fit_spatial_delta <- function(data, mesh, formula) {
+  tryCatch(
+    {
+      sdmTMB(
+        formula,
+        data = data,
+        mesh = mesh,
+        family = delta_gamma(type = "poisson-link"),
+        spatial = "on",
+        spatiotemporal = "off"
+      )
+    },
+    error = function(e) {
+      message("Shared spatial field in both delta components failed; refitting with occurrence-only spatial field.")
+      sdmTMB(
+        formula,
+        data = data,
+        mesh = mesh,
+        family = delta_gamma(type = "poisson-link"),
+        spatial = list("on", "off"),
+        spatiotemporal = "off"
+      )
+    }
+  )
+}
+
+fit_spatial_varying_delta <- function(data, mesh, formula, spatial_varying) {
+  sdmTMB(
+    formula,
+    data = data,
+    mesh = mesh,
+    family = delta_gamma(type = "poisson-link"),
+    spatial = "off",
+    spatiotemporal = "off",
+    spatial_varying = spatial_varying
+  )
+}
+```
+
+## Read and harmonize source data
+
+```{r read-data}
+sample_meta_workbook <- read_csv(biomass_file, show_col_types = FALSE) |>
+  clean_names() |>
+  distinct(sample_id, .keep_all = TRUE) |>
+  transmute(
+    sample_id,
+    year_wb = suppressWarnings(as.integer(year)),
+    month_wb = suppressWarnings(as.integer(month)),
+    quarter_wb = suppressWarnings(as.integer(quarter)),
+    latitude_wb = suppressWarnings(as.numeric(latitude)),
+    longitude_wb = suppressWarnings(as.numeric(longitude)),
+    colony_wb = normalize_colony_name(colony),
+    collection_method_wb = if_else(
+      is.na(collection_method) | collection_method == "",
+      "Unknown",
+      as.character(collection_method)
+    )
+  )
+
+diet_raw <- read_csv(biomass_file, show_col_types = FALSE) |>
+  clean_names() |>
+  left_join(sample_meta_workbook, by = "sample_id") |>
+  mutate(
+    year = coalesce(year_wb, suppressWarnings(as.integer(year))),
+    month = coalesce(month_wb, suppressWarnings(as.integer(month))),
+    quarter = coalesce(quarter_wb, suppressWarnings(as.integer(quarter))),
+    latitude = coalesce(latitude_wb, suppressWarnings(as.numeric(latitude))),
+    longitude = coalesce(longitude_wb, suppressWarnings(as.numeric(longitude))),
+    colony = coalesce(colony_wb, normalize_colony_name(colony)),
+    collection_method = coalesce(collection_method_wb, as.character(collection_method)),
+    collection_method = if_else(is.na(collection_method) | collection_method == "", "Unknown", collection_method),
+    colony = if_else(is.na(colony) | colony == "", "Unknown", colony),
+    family = if_else(is.na(family) | family == "", "Unknown", family),
+    prey_species = prey_species_lat,
+    quarter = coalesce(quarter, ((month - 1L) %/% 3L) + 1L)
+  ) |>
+  select(-ends_with("_wb"))
+
+sample_meta_all <- diet_raw |>
+  filter(!is.na(sample_id), !is.na(year), !is.na(latitude), !is.na(longitude)) |>
+  distinct(sample_id, .keep_all = TRUE) |>
+  transmute(
+    sample_id,
+    year,
+    month,
+    quarter,
+    lat = latitude,
+    lon = longitude,
+    collection_method,
+    colony
+  )
+
+diet_rows_all <- diet_raw |>
+  filter(
+    !is.na(sample_id),
+    !is.na(biomass_not_corrected),
+    !is.na(prey_species),
+    prey_species != "",
+    tolower(prey_species) != "non prey item"
+  ) |>
+  transmute(
+    sample_id,
+    family,
+    biomass_kg = biomass_not_corrected / 1000
+  ) |>
+  summarise(biomass_kg = sum(biomass_kg, na.rm = TRUE), .by = c(sample_id, family))
+
+sample_totals_all <- diet_rows_all |>
+  summarise(sum_biomass_kg = sum(biomass_kg, na.rm = TRUE), .by = sample_id)
+
+sample_meta_filtered <- sample_meta_all |>
+  left_join(sample_totals_all, by = "sample_id") |>
+  mutate(sum_biomass_kg = coalesce(sum_biomass_kg, 0)) |>
+  filter(
+    collection_method %in% method_keep,
+    colony %in% colony_keep,
+    sum_biomass_kg > 0
+  )
+
+if (nrow(sample_meta_filtered) == 0) {
+  stop("No samples remain after filtering by colony, method, and positive total biomass.")
+}
+
+analysis_year_max <- max(sample_meta_filtered$year, na.rm = TRUE)
+
+sample_meta_main <- sample_meta_filtered |>
+  filter(year >= analysis_year_min, year <= analysis_year_max)
+
+diet_rows_main <- diet_rows_all |>
+  semi_join(sample_meta_main, by = "sample_id")
+```
+
+## Support summaries and family grouping
+
+```{r support-tables}
+n_main_samples <- nrow(sample_meta_main)
+
+family_support_main <- diet_rows_main |>
+  summarise(
+    total_biomass_kg = sum(biomass_kg, na.rm = TRUE),
+    n_samples_present = n_distinct(sample_id[biomass_kg > 0]),
+    .by = family
+  ) |>
+  mutate(
+    prevalence = n_samples_present / n_main_samples,
+    zero_rate = 1 - prevalence
+  ) |>
+  arrange(desc(total_biomass_kg))
+
+family_keep <- dominant_families
+family_levels <- unique(c(family_keep, "Other"))
+
+diet_rows_grouped <- diet_rows_main |>
+  mutate(family = if_else(family %in% family_keep, family, "Other")) |>
+  summarise(biomass_kg = sum(biomass_kg, na.rm = TRUE), .by = c(sample_id, family))
+
+family_support_grouped <- diet_rows_grouped |>
+  summarise(
+    total_biomass_kg = sum(biomass_kg, na.rm = TRUE),
+    n_samples_present = n_distinct(sample_id[biomass_kg > 0]),
+    .by = family
+  ) |>
+  mutate(
+    prevalence = n_samples_present / n_main_samples,
+    zero_rate = 1 - prevalence,
+    family = factor(family, levels = family_levels)
+  ) |>
+  arrange(family)
+
+#write_csv(sample_meta_filtered, file.path(data_dir, "sample-metadata-filtered-all-years.csv"))
+#write_csv(sample_meta_main, file.path(data_dir, "sample-metadata-main-period.csv"))
+#write_csv(family_support_main, file.path(tables_dir, "family-support-main-period-raw.csv"))
+#write_csv(family_support_grouped, file.path(tables_dir, "family-support-main-period-grouped.csv"))
+```
+
+```{r build-model-table}
+year_center <- mean(sample_meta_main$year, na.rm = TRUE)
+
+diet_model <- sample_meta_main |>
+  select(sample_id, year, month, quarter, lat, lon, collection_method, colony, sum_biomass_kg) |>
+  tidyr::expand_grid(family = family_levels) |>
+  left_join(diet_rows_grouped, by = c("sample_id", "family")) |>
+  mutate(
+    biomass_kg = coalesce(biomass_kg, 0),
+    present = as.integer(biomass_kg > 0),
+    prop_biomass = if_else(sum_biomass_kg > 0, biomass_kg / sum_biomass_kg, 0),
+    year_ct = year - year_center,
+    collection_method = factor(collection_method, levels = method_keep),
+    colony = factor(colony, levels = colony_keep),
+    family = factor(family, levels = family_levels),
+    quarter_f = factor(quarter),
+    month_f = factor(month)
+  ) |>
+  add_utm_columns(ll_names = c("lon", "lat"))
+
+#write_csv(diet_model, file.path(data_dir, "diet-family-model-table-2013-2025.csv"))
+
+diet_model |>
+  summarise(
+    n_samples = n_distinct(sample_id),
+    n_rows = n(),
+    min_year = min(year),
+    max_year = max(year),
+    n_families = n_distinct(family)
+  )
+```
+
+## Support diagnostics
+
+```{r support-plots}
+samples_by_year_method <- sample_meta_main |>
+  count(year, collection_method, name = "n_samples")
+
+samples_by_colony_method <- sample_meta_main |>
+  count(colony, collection_method, name = "n_samples")
+
+sample_map <- sample_meta_main |>
+  ggplot(aes(lon, lat, colour = collection_method)) +
+  geom_point(alpha = 0.8, size = 2) +
+  coord_sf() +
+  labs(
+    title = "Retained samples in the main analysis period",
+    subtitle = "Colonies through Onsala only; methods restricted to Faeces and Hunt",
+    x = "Longitude",
+    y = "Latitude",
+    colour = "Method"
+  )
+
+plot_year_method <- samples_by_year_method |>
+  ggplot(aes(year, n_samples, fill = collection_method)) +
+  geom_col(position = "stack") +
+  labs(
+    title = "Samples by year and collection method",
+    x = "Year",
+    y = "Samples",
+    fill = "Method"
+  )
+
+plot_colony_method <- samples_by_colony_method |>
+  ggplot(aes(colony, n_samples, fill = collection_method)) +
+  geom_col(position = "stack") +
+  labs(
+    title = "Samples by colony and collection method",
+    subtitle = "Colony is retained for support diagnostics only",
+    x = NULL,
+    y = "Samples",
+    fill = "Method"
+  )
+
+plot_family_support <- family_support_grouped |>
+  mutate(family = fct_reorder(as.character(family), total_biomass_kg)) |>
+  ggplot(aes(total_biomass_kg, family)) +
+  geom_col(fill = "steelblue") +
+  labs(
+    title = "Grouped prey families retained for modelling",
+    subtitle = "Fixed dominant-family set; all remaining families grouped as Other",
+    x = "Total biomass (kg)",
+    y = NULL
+  )
+
+plot_zero_rate <- family_support_grouped |>
+  mutate(family = fct_reorder(as.character(family), zero_rate)) |>
+  ggplot(aes(zero_rate, family)) +
+  geom_col(fill = "tomato") +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Zero proportion by prey family",
+    x = "Zero proportion",
+    y = NULL
+  )
+
+sample_map
+plot_year_method
+plot_colony_method
+plot_family_support
+plot_zero_rate
+
+#ggsave(file.path(figures_dir, "sample-map-main-period.png"), sample_map, width = 8, height = 6, dpi = 300)
+#ggsave(file.path(figures_dir, "samples-by-year-method.png"), plot_year_method, width = 9, height = 5, dpi = 300)
+#ggsave(file.path(figures_dir, "samples-by-colony-method.png"), plot_colony_method, width = 8, height = 5, dpi = 300)
+#ggsave(file.path(figures_dir, "family-support-grouped.png"), plot_family_support, width = 8, height = 5, dpi = 300)
+#ggsave(file.path(figures_dir, "family-zero-rate.png"), plot_zero_rate, width = 8, height = 5, dpi = 300)
+```
+
+## Mesh
+
+```{r mesh}
+mesh <- make_mesh(diet_model, xy_cols = c("X", "Y"), type = "cutoff", cutoff = mesh_cutoff_km)
+
+plot(mesh)
+points(
+  diet_model |>
+    distinct(sample_id, X, Y) |>
+    pull(X),
+  diet_model |>
+    distinct(sample_id, X, Y) |>
+    pull(Y),
+  pch = 16,
+  cex = 0.4,
+  col = scales::alpha("black", 0.5)
+)
+```
+
+## Candidate models
+
+```{r fit-models}
+model_formula <- biomass_kg ~ 0 + family + collection_method + s(year_ct, by = family, k = 4)
+
+m1 <- sdmTMB(
+  biomass_kg ~ 0 + family + collection_method,
+  data = diet_model,
+  family = delta_gamma(type = "poisson-link"),
+  spatial = "off"
+)
+
+m2 <- sdmTMB(
+  model_formula,
+  data = diet_model,
+  family = delta_gamma(type = "poisson-link"),
+  spatial = "off"
+)
+
+m3 <- fit_spatial_delta(
+  data = diet_model,
+  mesh = mesh,
+  formula = model_formula
+)
+
+m4 <- fit_spatial_varying_delta(
+  data = diet_model,
+  mesh = mesh,
+  formula = model_formula,
+  spatial_varying = ~ 0 + family
+)
+
+model_list <- list(m1 = m1, m2 = m2, m3 = m3, m4 = m4)
+
+#saveRDS(model_list, file.path(data_dir, "diet-family-models-2013-2025.rds"))
+#saveRDS(mesh, file.path(data_dir, "diet-family-mesh-2013-2025.rds"))
+```
+
+## Model comparison
+
+```{r compare-models}
+aic_table <- AIC(m1, m2, m3, m4) |>
+  as.data.frame() |>
+  tibble::rownames_to_column("model") |>
+  as_tibble() |>
+  arrange(AIC)
+
+#write_csv(aic_table, file.path(tables_dir, "model-comparison-aic.csv"))
+
+aic_table
+```
+
+## Shared versus family-specific spatial structure
+
+```{r compare-spatial-structures}
+spatial_structure_table <- AIC(m3, m4) |>
+  as.data.frame() |>
+  tibble::rownames_to_column("model") |>
+  as_tibble() |>
+  arrange(AIC)
+
+#write_csv(spatial_structure_table, file.path(tables_dir, "spatial-structure-comparison-aic.csv"))
+
+spatial_structure_table
+```
+
+## Sanity checks
+
+```{r sanity-checks}
+sanity_checks <- list(
+  m1 = sanity(m1),
+  m2 = sanity(m2),
+  m3 = sanity(m3),
+  m4 = sanity(m4)
+)
+
+#knitr::kable(sanity_checks$m4, caption = "Sanity checks for m4 (primary family-specific spatial model)")
+
+sanity_checks$m4
+```
+
+## Residual diagnostics for the best-supported model
+
+```{r residual-diagnostics}
+best_model_name <- aic_table$model[[1]]
+best_model <- model_list[[best_model_name]]
+
+best_residuals <- simulate(best_model, nsim = 200, type = "mle-mvn") |>
+  dharma_residuals(best_model, plot = FALSE)
+
+residual_plot <- best_residuals |>
+  ggplot(aes(observed, expected)) +
+  geom_point(colour = "grey30", shape = 21, size = 0.8) +
+  geom_abline(colour = "tomato3", linewidth = 0.6) +
+  theme(aspect.ratio = 1) +
+  labs(
+    title = paste("Residual check for", best_model_name),
+    x = "Observed",
+    y = "Expected"
+  )
+
+residual_plot
+
+#ggsave(file.path(figures_dir, paste0("residual-check-", best_model_name, ".png")), residual_plot, width = 6, height = 6, dpi = 300)
+```
+
+## Family trends from the smooth-year model
+
+```{r trend-predictions}
+method_reference <- if ("Faeces" %in% levels(diet_model$collection_method)) "Faeces" else levels(diet_model$collection_method)[1]
+
+trend_grid <- tidyr::expand_grid(
+  family = levels(diet_model$family),
+  year = seq(min(diet_model$year), max(diet_model$year)),
+  collection_method = factor(method_reference, levels = levels(diet_model$collection_method))
+) |>
+  mutate(
+    family = factor(family, levels = levels(diet_model$family)),
+    year_ct = year - year_center
+  )
+
+trend_predictions <- predict(m2, newdata = trend_grid, se_fit = TRUE) |>
+  mutate(
+    est = as.numeric(est),
+    est_se = as.numeric(est_se),
+    est_response = exp(est),
+    lwr_response = exp(est - 1.96 * est_se),
+    upr_response = exp(est + 1.96 * est_se)
+  )
+
+trend_predictions_export <- trend_predictions |>
+  select(family, year, collection_method, year_ct, est, est_se, lwr_response, est_response, upr_response)
+
+#write_csv(trend_predictions_export, file.path(data_dir, "m2-family-trend-predictions.csv"))
+
+trend_plot <- trend_predictions |>
+  ggplot(aes(year, est_response, colour = family, fill = family)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lwr_response, ymax = upr_response), alpha = 0.2, colour = NA) +
+  facet_wrap(~family, scales = "free_y") +
+  labs(
+    title = "Family-specific biomass trends",
+    subtitle = paste("M2 predictions adjusted for collection method =", method_reference),
+    x = "Year",
+    y = "Expected biomass per sample (kg)",
+    colour = "Family",
+    fill = "Family"
+  ) +
+  theme(legend.position = "none")
+
+trend_plot
+
+#ggsave(file.path(figures_dir, "m2-family-trends.png"), trend_plot, width = 12, height = 8, dpi = 300)
+```
+
+## Spatial predictions from the primary and comparison spatial models
+
+```{r map-grid}
+map_years_available <- sort(unique(sample_meta_main$year))
+map_years <- unique(c(
+  min(map_years_available),
+  map_years_available[ceiling(length(map_years_available) / 2)],
+  max(map_years_available)
+))
+
+utm_zone <- floor((median(diet_model$lon, na.rm = TRUE) + 180) / 6) + 1
+utm_crs <- paste0("+proj=utm +zone=", utm_zone, " +datum=WGS84 +units=m")
+
+sample_xy <- diet_model |>
+  distinct(sample_id, X, Y)
+
+grid_xy <- expand.grid(
+  X = seq(floor(min(sample_xy$X)) - 1, ceiling(max(sample_xy$X)) + 1, by = grid_res_km),
+  Y = seq(floor(min(sample_xy$Y)) - 1, ceiling(max(sample_xy$Y)) + 1, by = grid_res_km)
+)
+
+sample_sf <- sample_xy |>
+  transmute(X = X * 1000, Y = Y * 1000) |>
+  st_as_sf(coords = c("X", "Y"), crs = utm_crs)
+
+hull <- sample_sf |>
+  summarise(do_union = TRUE) |>
+  st_convex_hull() |>
+  st_buffer(dist = 5000)
+
+ices_map_bbox <- st_bbox(hull |> st_buffer(dist = 15000))
+
+ices_boundaries <- st_read(ices_areas_file, quiet = TRUE) |>
+  st_transform(utm_crs) |>
+  st_crop(ices_map_bbox) |>
+  st_boundary()
+
+ices_map_lines <- st_coordinates(ices_boundaries) |>
+  as.data.frame()
+
+ices_group_cols <- setdiff(names(ices_map_lines), c("X", "Y"))
+
+if (length(ices_group_cols) == 0) {
+  ices_map_lines$group <- 1L
+} else {
+  ices_map_lines$group <- do.call(interaction, c(ices_map_lines[ices_group_cols], drop = TRUE))
+}
+
+ices_map_lines <- ices_map_lines |>
+  transmute(
+    X = X / 1000,
+    Y = Y / 1000,
+    group = as.integer(group)
+  )
+
+grid_sf <- grid_xy |>
+  transmute(X = X * 1000, Y = Y * 1000) |>
+  st_as_sf(coords = c("X", "Y"), crs = utm_crs)
+
+inside <- st_intersects(grid_sf, hull, sparse = FALSE)[, 1]
+grid_sf <- grid_sf[inside, ]
+grid_ll <- st_transform(grid_sf, 4326)
+grid_coords <- st_coordinates(grid_ll)
+
+prediction_grid <- tibble::tibble(
+  X = st_coordinates(grid_sf)[, 1] / 1000,
+  Y = st_coordinates(grid_sf)[, 2] / 1000,
+  lon = grid_coords[, 1],
+  lat = grid_coords[, 2]
+)
+
+#write_csv(prediction_grid, file.path(data_dir, "prediction-grid.csv"))
+```
+
+```{r map-predictions, fig.width=15, fig.height=14}
+map_newdata <- prediction_grid |>
+  tidyr::expand_grid(
+    family = levels(diet_model$family),
+    year = map_years,
+    collection_method = factor(method_reference, levels = levels(diet_model$collection_method))
+  ) |>
+  mutate(
+    family = factor(family, levels = levels(diet_model$family)),
+    year_ct = year - year_center
+  )
+
+map_predictions <- predict(m3, newdata = map_newdata) |>
+  mutate(
+    est1 = as.numeric(est1),
+    est2 = as.numeric(est2),
+    expected_biomass_kg = exp(est1 + est2)
+  )
+
+#write_csv(map_predictions, file.path(data_dir, "m3-map-predictions.csv"))
+
+main_map_families <- dominant_families
+appendix_map_families <- setdiff(levels(diet_model$family), main_map_families)
+
+map_plot_main <- map_predictions |>
+  filter(family %in% main_map_families) |>
+  mutate(family = factor(family, levels = main_map_families)) |>
+  ggplot(aes(X, Y, fill = expected_biomass_kg)) +
+  geom_raster() +
+  geom_path(
+    data = ices_map_lines,
+    aes(x = X, y = Y, group = group),
+    inherit.aes = FALSE,
+    colour = "grey50",
+    linewidth = 0.2
+  ) +
+  coord_equal() +
+  scale_fill_viridis_c(option = "C") +
+  facet_grid(family ~ year) +
+  labs(
+    title = "Expected biomass per sample for dominant prey families",
+    subtitle = paste("M3 shared spatial field; snapshot years; collection method fixed to", method_reference),
+    x = "UTM Easting (km)",
+    y = "UTM Northing (km)",
+    fill = "kg/sample"
+  )
+
+map_plot_appendix <- map_predictions |>
+  filter(family %in% appendix_map_families) |>
+  mutate(family = factor(family, levels = appendix_map_families)) |>
+  ggplot(aes(X, Y, fill = expected_biomass_kg)) +
+  geom_raster() +
+  geom_path(
+    data = ices_map_lines,
+    aes(x = X, y = Y, group = group),
+    inherit.aes = FALSE,
+    colour = "grey50",
+    linewidth = 0.2
+  ) +
+  coord_equal() +
+  scale_fill_viridis_c(option = "C") +
+  facet_grid(family ~ year) +
+  labs(
+    title = "Expected biomass per sample for appendix prey families",
+    subtitle = paste("M3 shared spatial field; snapshot years; collection method fixed to", method_reference),
+    x = "UTM Easting (km)",
+    y = "UTM Northing (km)",
+    fill = "kg/sample"
+  )
+
+map_plot_main
+map_plot_appendix
+
+#ggsave(file.path(maps_dir, "m3-expected-biomass-maps-main.png"), map_plot_main, width = 15, height = 14, dpi = 300)
+#ggsave(file.path(maps_dir, "m3-expected-biomass-maps-appendix.png"), map_plot_appendix, width = 13, height = 6.5, dpi = 300)
+
+m4_map_predictions <- predict(m4, newdata = map_newdata) |>
+  mutate(
+    est1 = as.numeric(est1),
+    est2 = as.numeric(est2),
+    expected_biomass_kg = exp(est1 + est2)
+  )
+
+#write_csv(m4_map_predictions, file.path(data_dir, "m4-map-predictions.csv"))
+
+m4_map_plot_main <- m4_map_predictions |>
+  filter(family %in% main_map_families) |>
+  mutate(family = factor(family, levels = main_map_families)) |>
+  ggplot(aes(X, Y, fill = expected_biomass_kg)) +
+  geom_raster() +
+  geom_path(
+    data = ices_map_lines,
+    aes(x = X, y = Y, group = group),
+    inherit.aes = FALSE,
+    colour = "grey50",
+    linewidth = 0.2
+  ) +
+  coord_equal() +
+  scale_fill_viridis_c(option = "C") +
+  facet_grid(family ~ year) +
+  labs(
+    title = "Expected biomass per sample for dominant prey families",
+    subtitle = paste("M4 family-specific spatial effects; snapshot years; collection method fixed to", method_reference),
+    x = "UTM Easting (km)",
+    y = "UTM Northing (km)",
+    fill = "kg/sample"
+  )
+
+m4_map_plot_appendix <- m4_map_predictions |>
+  filter(family %in% appendix_map_families) |>
+  mutate(family = factor(family, levels = appendix_map_families)) |>
+  ggplot(aes(X, Y, fill = expected_biomass_kg)) +
+  geom_raster() +
+  geom_path(
+    data = ices_map_lines,
+    aes(x = X, y = Y, group = group),
+    inherit.aes = FALSE,
+    colour = "grey50",
+    linewidth = 0.2
+  ) +
+  coord_equal() +
+  scale_fill_viridis_c(option = "C") +
+  facet_grid(family ~ year) +
+  labs(
+    title = "Expected biomass per sample for appendix prey families",
+    subtitle = paste("M4 family-specific spatial effects; snapshot years; collection method fixed to", method_reference),
+    x = "UTM Easting (km)",
+    y = "UTM Northing (km)",
+    fill = "kg/sample"
+  )
+
+m4_map_plot_main
+m4_map_plot_appendix
+
+#ggsave(file.path(maps_dir, "m4-expected-biomass-maps-main.png"), m4_map_plot_main, width = 15, height = 14, dpi = 300)
+#ggsave(file.path(maps_dir, "m4-expected-biomass-maps-appendix.png"), m4_map_plot_appendix, width = 13, height = 6.5, dpi = 300)
+```
+
+
