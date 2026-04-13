@@ -115,7 +115,7 @@ sp_poly <- sp::SpatialPolygons(
 )
 sp_poly_df <- sp::SpatialPolygonsDataFrame(sp_poly, data = data.frame(ID = 1))
 
-cell_width <- 2
+cell_width <- 0.5
 
 pred_grid <- expand.grid(
   X = seq(min(haul_pts$X), max(haul_pts$X), cell_width),
