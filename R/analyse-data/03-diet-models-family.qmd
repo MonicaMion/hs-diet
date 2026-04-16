@@ -48,7 +48,7 @@ home <- here::here()
 biomass_file <- file.path(home, "Data", "HS_SKAG_estimated_abundance_biomass_130426.csv")
 ices_areas_file <- file.path(home, "Data", "shapefiles", "ICES_areas", "ICES_Areas_20160601_cut_dense_3857.shp")
 
-colony_keep <- c("Koster", "Lysekil", "Marstrand", "Onsala")
+colony_keep <- c("Koster", "Lysekil", "Marstrand", "Onsala", "Väderöarna")
 method_keep <- c("Faeces", "Hunt")
 analysis_year_min <- 2013L
 dominant_families <- c("Gadidae", "Clupeidae", "Pleuronectidae", "Gobiidae")
@@ -734,5 +734,4 @@ m4_map_plot_appendix
 #ggsave(file.path(maps_dir, "m4-expected-biomass-maps-main.png"), m4_map_plot_main, width = 15, height = 14, dpi = 300)
 #ggsave(file.path(maps_dir, "m4-expected-biomass-maps-appendix.png"), m4_map_plot_appendix, width = 13, height = 6.5, dpi = 300)
 ```
-
 
