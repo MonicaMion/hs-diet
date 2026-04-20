@@ -56,6 +56,15 @@ method_keep <- c("Faeces", "Hunt")
 analysis_year_min <- 2013L
 dominant_families <- c("Gadidae", "Clupeidae", "Pleuronectidae", "Gobiidae")
 
+family_palette <- c(
+  "Gadidae"        = "#2E6B1F",
+  "Clupeidae"      = "#1F5AA6",
+  "Pleuronectidae" = "#D94FD3",
+  "Gobiidae"       = "#F39C12",
+  "Other"          = "#9E4A7A",
+  "Total"          = "#000000"
+)
+
 normalize_colony_name <- function(x) {
   x <- trimws(as.character(x))
   case_when(
@@ -382,6 +391,7 @@ plot(mesh)
 ## Candidate models
 
 ```{r fit-models}
+#| cache: true
 # Spatial no time
 m1 <- sdmTMB(
   formula = biomass_kg ~ 0 + family + collection_method,
@@ -487,11 +497,11 @@ p |>
                     ymax = exp(est + est_se*1.96)),
               alpha = 0.3, color = NA) +
   scale_x_continuous(breaks = seq(2012, 2025, by = 3)) +
-  theme(legend.position = "bottom") +
-  #theme(legend.position.inside = c(0.85, 0.2)) +
-  # guides(fill = "none", 
-  #        color = guide_legend(position = "inside")) +
-  #facet_wrap(~family) +
+  scale_color_manual(values = family_palette) +
+  scale_fill_manual(values = family_palette) +
+  theme(legend.position = "right") +
+  guides(fill = "none") +
+  labs(y = "Kg/sample", color = "Family") +
   facet_wrap(~family, scales = "free") +
   geom_line()
 
@@ -502,6 +512,8 @@ p |>
          .by = c(year)) |> 
   ggplot(aes(year, prop, color = family, fill = family)) + 
   scale_x_continuous(breaks = seq(2012, 2025, by = 3)) +
+  scale_color_manual(values = family_palette) +
+  scale_fill_manual(values = family_palette) +
   coord_cartesian(expand = 0) +
   geom_area()
 ```
