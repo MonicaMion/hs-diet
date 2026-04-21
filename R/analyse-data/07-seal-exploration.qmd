@@ -1,0 +1,222 @@
+---
+title: "Seal Exploration"
+author: "Max Lindmark & Monica Mion"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format:
+  html:
+    toc: true
+    page-layout: full
+    embed-resources: true
+editor: source
+execute:
+  echo: true
+  eval: true
+  warning: false
+  message: false
+  cache: false
+---
+
+## Purpose
+
+This notebook explores harbour seal body length data for the same filtered sample subset used in `03b-diet-models-family.qmd`.
+
+The workflow is:
+
+- retain colonies through Onsala only,
+- retain Faeces and Hunt samples only,
+- retain samples with positive prey biomass,
+- retain 2013-2025 as the main analysis period,
+- summarise seal length availability,
+- plot the seal length frequency distribution,
+- check whether seal size varies over time or space.
+
+```{r setup}
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(janitor)
+library(ggsidekick)
+
+theme_set(theme_sleek())
+
+home <- here::here()
+biomass_file <- file.path(home, "Data", "HS_SKAG_estimated_abundance_biomass_130426.csv")
+
+colony_keep <- c("Koster", "Väderöarna", "Lysekil", "Marstrand", "Onsala")
+method_keep <- c("Faeces", "Hunt")
+analysis_year_min <- 2013L
+
+normalize_colony_name <- function(x) {
+  x <- trimws(as.character(x))
+  case_when(
+    grepl("der.*arna", x, ignore.case = TRUE) ~ "Väderöarna",
+    grepl("^Hallands.*der", x, ignore.case = TRUE) ~ "Hallands Väderö",
+    TRUE ~ x
+  )
+}
+```
+
+## Read and filter sample metadata
+
+```{r read-data}
+seal_raw <- read_csv(biomass_file, show_col_types = FALSE) |>
+  clean_names()
+
+sample_meta_all <- seal_raw |>
+  distinct(sample_id, .keep_all = TRUE) |>
+  transmute(
+    sample_id,
+    year = suppressWarnings(as.integer(year)),
+    month = suppressWarnings(as.integer(month)),
+    quarter = coalesce(suppressWarnings(as.integer(quarter)), ((month - 1L) %/% 3L) + 1L),
+    lat = suppressWarnings(as.numeric(latitude)),
+    lon = suppressWarnings(as.numeric(longitude)),
+    colony = normalize_colony_name(colony),
+    collection_method = if_else(
+      is.na(collection_method) | collection_method == "",
+      "Unknown",
+      as.character(collection_method)
+    ),
+    body_length_cm = suppressWarnings(as.numeric(body_length_cm))
+  )
+
+sample_totals_all <- seal_raw |>
+  filter(
+    !is.na(sample_id),
+    !is.na(biomass_not_corrected),
+    !is.na(prey_species_lat),
+    prey_species_lat != "",
+    tolower(prey_species_lat) != "non prey item"
+  ) |>
+  transmute(
+    sample_id,
+    biomass_kg = biomass_not_corrected / 1000
+  ) |>
+  summarise(sum_biomass_kg = sum(biomass_kg, na.rm = TRUE), .by = sample_id)
+
+sample_meta_main <- sample_meta_all |>
+  left_join(sample_totals_all, by = "sample_id") |>
+  mutate(sum_biomass_kg = coalesce(sum_biomass_kg, 0)) |>
+  filter(
+    !is.na(year),
+    !is.na(lat),
+    !is.na(lon),
+    collection_method %in% method_keep,
+    colony %in% colony_keep,
+    sum_biomass_kg > 0,
+    year >= analysis_year_min
+  )
+```
+
+## Seal length availability
+
+```{r length-summary}
+sample_meta_main |>
+  summarise(
+    total_samples = n(),
+    samples_with_body_length = sum(!is.na(body_length_cm)),
+    prop_with_body_length = samples_with_body_length / total_samples,
+    mean_body_length_cm = mean(body_length_cm, na.rm = TRUE),
+    sd_body_length_cm = sd(body_length_cm, na.rm = TRUE),
+    min_body_length_cm = min(body_length_cm, na.rm = TRUE),
+    median_body_length_cm = median(body_length_cm, na.rm = TRUE),
+    max_body_length_cm = max(body_length_cm, na.rm = TRUE)
+  )
+
+sample_meta_main |>
+  count(collection_method, has_body_length = !is.na(body_length_cm))
+```
+
+## Seal length frequency distribution
+
+```{r length-frequency}
+sample_meta_main |>
+  filter(!is.na(body_length_cm)) |>
+  ggplot(aes(x = body_length_cm)) +
+  geom_histogram(binwidth = 5, color = "white", fill = "grey40") +
+  labs(
+    x = "Seal length (cm)",
+    y = "Number of samples",
+    title = "Seal length frequency distribution",
+    subtitle = "03b analysis subset"
+  )
+```
+
+## Trend over time
+
+```{r length-over-time}
+seal_length_data <- sample_meta_main |>
+  filter(!is.na(body_length_cm))
+
+seal_length_data |>
+  summarise(
+    cor_year_length = cor(year, body_length_cm),
+    n = n()
+  )
+
+seal_length_data |>
+  summarise(
+    mean_length_cm = mean(body_length_cm),
+    .by = year
+  ) |>
+  ggplot(aes(year, mean_length_cm)) +
+  geom_point(size = 2) +
+  geom_line() +
+  labs(
+    x = "Year",
+    y = "Mean seal length (cm)",
+    title = "Mean seal length by year",
+    subtitle = "03b analysis subset"
+  )
+
+seal_length_data |>
+  ggplot(aes(year, body_length_cm)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  labs(
+    x = "Year",
+    y = "Seal length (cm)",
+    title = "Seal length over time",
+    subtitle = "Linear trend shown for reference"
+  )
+
+summary(lm(body_length_cm ~ year, data = seal_length_data))$coefficients
+```
+
+## Pattern in space
+
+```{r length-in-space}
+seal_length_data |>
+  summarise(
+    n = n(),
+    mean_length_cm = mean(body_length_cm),
+    sd_length_cm = sd(body_length_cm),
+    .by = colony
+  ) |>
+  arrange(desc(n))
+
+seal_length_data |>
+  ggplot(aes(colony, body_length_cm)) +
+  geom_boxplot() +
+  labs(
+    x = NULL,
+    y = "Seal length (cm)",
+    title = "Seal length by colony",
+    subtitle = "03b analysis subset"
+  )
+
+seal_length_data |>
+  ggplot(aes(lon, lat, color = body_length_cm)) +
+  geom_point(size = 2, alpha = 0.8) +
+  scale_color_viridis_c(option = "C") +
+  coord_equal() +
+  labs(
+    x = "Longitude",
+    y = "Latitude",
+    color = "Length (cm)",
+    title = "Spatial distribution of seal length",
+    subtitle = "03b analysis subset"
+  )
+
+summary(lm(body_length_cm ~ lon + lat, data = seal_length_data))$coefficients
+```
