@@ -483,18 +483,38 @@ ndt <- tibble(
   
 p <- predict(m6, newdata = ndt, re_form = NA, se_fit = TRUE)
 
-tot <- p |>
-  mutate(sum = sum(est), .by = year) |> 
-  filter(family == "Other") |> 
-  mutate(family = "Total",
-         est_se = NA)
+tot_pred <- predict(m6, newdata = ndt, re_form = NA, nsim = 500)
 
+tot_pred <- tot_pred |> 
+  as.data.frame() |> 
+  bind_cols(ndt) |> 
+  pivot_longer(cols = starts_with("V"), names_to = "sim") 
+
+# tot_pred |> 
+#   summarise(sum = sum(value), .by = c(year, sim)) |> 
+#   ggplot(aes(sum)) + 
+#   geom_histogram()
+
+tot_pred |> 
+  filter(sim == "V1" & year == 2024)
+
+tot <- tot_pred |> 
+  mutate(value = exp(value)) |> 
+  summarise(sum = sum(value), .by = c(year, sim)) |> 
+  summarise(est = median(sum),
+            lwr = quantile(sum, probs = 0.05),
+            upr = quantile(sum, probs = 0.95), 
+            sd = sd(sum),
+            .by = year) |> 
+  mutate(family = "Total")
 
 p |> 
+  mutate(lwr = exp(est - 1.96*est_se),
+         upr = exp(est + 1.96*est_se),
+         est = exp(est)) |> 
   bind_rows(tot) |> 
-  ggplot(aes(year, exp(est), color = family, fill = family)) + 
-  geom_ribbon(aes(ymin = exp(est - est_se*1.96),
-                    ymax = exp(est + est_se*1.96)),
+  ggplot(aes(year, est, color = family, fill = family)) + 
+  geom_ribbon(aes(ymin = lwr, ymax = upr),
               alpha = 0.3, color = NA) +
   scale_x_continuous(breaks = seq(2012, 2025, by = 3)) +
   scale_color_manual(values = family_palette) +
@@ -504,6 +524,14 @@ p |>
   labs(y = "Kg/sample", color = "Family") +
   facet_wrap(~family, scales = "free") +
   geom_line()
+
+# Significant increase in total prey? - NO!
+# Use 1/sd as weights in linear regression!
+mod <- lm(est ~ year,
+          weights = 1/sd,
+          data = tot)
+
+summary(mod)
 
 # Plot proportion over time
 p |> 
