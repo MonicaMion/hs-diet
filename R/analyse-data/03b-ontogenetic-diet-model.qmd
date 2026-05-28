@@ -1,0 +1,934 @@
+---
+title: "Harbour Seal Ontogenetic Diet Family Models"
+author: "Max Lindmark & Monica Mion"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format:
+  html:
+    toc: true
+    page-layout: full
+    embed-resources: true
+editor: source
+execute:
+  echo: true
+  eval: true
+  warning: false
+  message: false
+  cache: false
+---
+
+## Purpose
+
+This notebook mirrors `03b-diet-models-family.qmd`, but focuses on ontogenetic variation in diet composition.
+
+The workflow is:
+
+- retain colonies through Onsala only,
+- retain hunted seals only,
+- keep the same dominant prey-family grouping as `03b`,
+- build a hunted-seal sample-by-family modelling table,
+- test whether seal length changes diet composition,
+- then test whether sex adds further structure once length is included.
+
+```{r setup}
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(forcats)
+library(stringr)
+library(janitor)
+library(sf)
+library(sdmTMB)
+library(purrr)
+library(rnaturalearth)
+library(ggsidekick)
+
+theme_set(theme_sleek())
+
+home <- here::here()
+
+biomass_file <- file.path(home, "Data", "HS_SKAG_estimated_abundance_biomass_130426.csv")
+
+colony_keep <- c("Koster", "Vaderoarna", "Lysekil", "Marstrand", "Onsala")
+analysis_year_min <- 2013L
+dominant_families <- c("Gadidae", "Clupeidae", "Pleuronectidae", "Gobiidae")
+
+family_palette <- c(
+  "Gadidae"        = "#2E6B1F",
+  "Clupeidae"      = "#1F5AA6",
+  "Pleuronectidae" = "#D94FD3",
+  "Gobiidae"       = "#F39C12",
+  "Other"          = "#9E4A7A",
+  "Total"          = "#000000"
+)
+
+normalize_colony_name <- function(x) {
+  x <- trimws(as.character(x))
+  case_when(
+    grepl("der.*arna", x, ignore.case = TRUE) ~ "Vaderoarna",
+    grepl("^Hallands.*der", x, ignore.case = TRUE) ~ "Hallands Vadero",
+    TRUE ~ x
+  )
+}
+```
+
+## Read and harmonize source data
+
+```{r read-data}
+sample_meta_workbook <- read_csv(biomass_file, show_col_types = FALSE) |>
+  clean_names() |>
+  distinct(sample_id, .keep_all = TRUE) |>
+  transmute(
+    sample_id,
+    year_wb = suppressWarnings(as.integer(year)),
+    month_wb = suppressWarnings(as.integer(month)),
+    quarter_wb = suppressWarnings(as.integer(quarter)),
+    latitude_wb = suppressWarnings(as.numeric(latitude)),
+    longitude_wb = suppressWarnings(as.numeric(longitude)),
+    colony_wb = normalize_colony_name(colony),
+    sex_wb = case_when(
+      sex %in% c("Female", "Male") ~ as.character(sex),
+      TRUE ~ NA_character_
+    ),
+    age_wb = suppressWarnings(as.numeric(age)),
+    body_length_cm_wb = suppressWarnings(as.numeric(body_length_cm)),
+    collection_method_wb = if_else(
+      is.na(collection_method) | collection_method == "",
+      "Unknown",
+      as.character(collection_method)
+    )
+  )
+
+diet_raw <- read_csv(biomass_file, show_col_types = FALSE) |>
+  clean_names() |>
+  left_join(sample_meta_workbook, by = "sample_id") |>
+  mutate(
+    year = coalesce(year_wb, suppressWarnings(as.integer(year))),
+    month = coalesce(month_wb, suppressWarnings(as.integer(month))),
+    quarter = coalesce(quarter_wb, suppressWarnings(as.integer(quarter))),
+    latitude = coalesce(latitude_wb, suppressWarnings(as.numeric(latitude))),
+    longitude = coalesce(longitude_wb, suppressWarnings(as.numeric(longitude))),
+    colony = coalesce(colony_wb, normalize_colony_name(colony)),
+    collection_method = coalesce(collection_method_wb, as.character(collection_method)),
+    collection_method = if_else(is.na(collection_method) | collection_method == "", "Unknown", collection_method),
+    family = if_else(is.na(family) | family == "", "Unknown", family),
+    prey_species = prey_species_lat,
+    sex = coalesce(sex_wb, case_when(
+      sex %in% c("Female", "Male") ~ as.character(sex),
+      TRUE ~ NA_character_
+    )),
+    age = coalesce(age_wb, suppressWarnings(as.numeric(age))),
+    body_length_cm = coalesce(body_length_cm_wb, suppressWarnings(as.numeric(body_length_cm))),
+    quarter = coalesce(quarter, ((month - 1L) %/% 3L) + 1L)
+  ) |>
+  select(-ends_with("_wb"))
+
+sample_meta_all <- diet_raw |>
+  filter(!is.na(sample_id), !is.na(year), !is.na(latitude), !is.na(longitude)) |>
+  distinct(sample_id, .keep_all = TRUE) |>
+  transmute(
+    sample_id,
+    year,
+    month,
+    quarter,
+    lat = latitude,
+    lon = longitude,
+    collection_method,
+    colony,
+    sex,
+    age,
+    body_length_cm
+  )
+
+diet_rows_all <- diet_raw |>
+  filter(
+    !is.na(sample_id),
+    !is.na(biomass_not_corrected),
+    !is.na(prey_species),
+    prey_species != "",
+    tolower(prey_species) != "non prey item"
+  ) |>
+  transmute(
+    sample_id,
+    family,
+    biomass_kg = biomass_not_corrected / 1000
+  ) |>
+  summarise(biomass_kg = sum(biomass_kg, na.rm = TRUE), .by = c(sample_id, family))
+
+sample_totals_all <- diet_rows_all |>
+  summarise(sum_biomass_kg = sum(biomass_kg, na.rm = TRUE), .by = sample_id)
+
+sample_meta_filtered <- sample_meta_all |>
+  left_join(sample_totals_all, by = "sample_id") |>
+  mutate(sum_biomass_kg = coalesce(sum_biomass_kg, 0)) |>
+  filter(
+    collection_method == "Hunt",
+    colony %in% colony_keep,
+    sum_biomass_kg > 0
+  )
+
+if (nrow(sample_meta_filtered) == 0) {
+  stop("No hunted samples remain after filtering by colony and positive total biomass.")
+}
+
+analysis_year_max <- max(sample_meta_filtered$year, na.rm = TRUE)
+
+sample_meta_main <- sample_meta_filtered |>
+  filter(year >= analysis_year_min, year <= analysis_year_max)
+
+diet_rows_main <- diet_rows_all |>
+  semi_join(sample_meta_main, by = "sample_id")
+```
+
+## Support summaries and family grouping
+
+```{r support-tables}
+n_main_samples <- nrow(sample_meta_main)
+
+family_levels <- unique(c(dominant_families, "Other"))
+
+family_support_main <- diet_rows_main |>
+  summarise(
+    total_biomass_kg = sum(biomass_kg, na.rm = TRUE),
+    n_samples_present = n_distinct(sample_id[biomass_kg > 0]),
+    .by = family
+  ) |>
+  mutate(
+    prevalence = n_samples_present / n_main_samples,
+    zero_rate = 1 - prevalence
+  ) |>
+  arrange(desc(total_biomass_kg))
+
+diet_rows_grouped <- diet_rows_main |>
+  mutate(family = if_else(family %in% dominant_families, family, "Other")) |>
+  summarise(biomass_kg = sum(biomass_kg, na.rm = TRUE), .by = c(sample_id, family))
+
+family_support_grouped <- diet_rows_grouped |>
+  summarise(
+    total_biomass_kg = sum(biomass_kg, na.rm = TRUE),
+    n_samples_present = n_distinct(sample_id[biomass_kg > 0]),
+    .by = family
+  ) |>
+  mutate(
+    prevalence = n_samples_present / n_main_samples,
+    zero_rate = 1 - prevalence,
+    family = factor(family, levels = family_levels)
+  ) |>
+  arrange(family)
+```
+
+## Build hunted-only model table
+
+```{r build-model-table}
+year_center <- mean(sample_meta_main$year, na.rm = TRUE)
+
+diet_model_all <- sample_meta_main |>
+  select(sample_id, year, month, quarter, lat, lon, colony, sum_biomass_kg, sex, age, body_length_cm) |>
+  expand_grid(family = family_levels) |>
+  left_join(diet_rows_grouped, by = c("sample_id", "family")) |>
+  mutate(
+    biomass_kg = coalesce(biomass_kg, 0),
+    present = as.integer(biomass_kg > 0),
+    prop_biomass = if_else(sum_biomass_kg > 0, biomass_kg / sum_biomass_kg, 0),
+    year_ct = year - year_center,
+    colony = factor(colony, levels = colony_keep),
+    family = factor(family, levels = family_levels),
+    sex = factor(sex, levels = c("Female", "Male")),
+    year_f = factor(year),
+    quarter_f = factor(quarter),
+    month_f = factor(month)
+  ) |>
+  add_utm_columns(ll_names = c("lon", "lat"))
+
+diet_model <- diet_model_all |>
+  filter(!is.na(body_length_cm))
+
+diet_model_sex <- diet_model |>
+  filter(!is.na(sex))
+
+diet_model |>
+  summarise(
+    n_samples = n_distinct(sample_id),
+    n_rows = n(),
+    min_year = min(year),
+    max_year = max(year),
+    n_families = n_distinct(family),
+    length_min = min(body_length_cm),
+    length_max = max(body_length_cm)
+  )
+```
+
+## Support diagnostics
+
+```{r support-plots}
+hunt_samples_by_year <- sample_meta_main |>
+  count(year, name = "n_samples")
+
+missing_covariates <- sample_meta_main |>
+  summarise(
+    n_samples = n(),
+    n_length = sum(!is.na(body_length_cm)),
+    n_sex = sum(!is.na(sex)),
+    n_age = sum(!is.na(age)),
+    n_length_sex = sum(!is.na(body_length_cm) & !is.na(sex)),
+    n_all_three = sum(!is.na(body_length_cm) & !is.na(sex) & !is.na(age))
+  )
+
+age_length_plot <- sample_meta_main |>
+  filter(!is.na(body_length_cm), !is.na(age), !is.na(sex)) |>
+  ggplot(aes(age, body_length_cm, color = sex)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 1) +
+  labs(
+    title = "Relation between seal age and length",
+    subtitle = "Separate fitted lines for female and male hunted seals",
+    x = "Age",
+    y = "Body length (cm)",
+    color = "Sex"
+  )
+
+length_histogram <- sample_meta_main |>
+  filter(!is.na(body_length_cm)) |>
+  ggplot(aes(body_length_cm)) +
+  geom_histogram(binwidth = 5, color = "white", fill = "grey40") +
+  labs(
+    title = "Seal length distribution in hunted samples",
+    x = "Body length (cm)",
+    y = "Samples"
+  )
+
+length_histogram_sex_colony <- sample_meta_main |>
+  filter(!is.na(body_length_cm), !is.na(sex)) |>
+  mutate(colony = factor(colony, levels = colony_keep)) |>
+  ggplot(aes(body_length_cm, fill = sex)) +
+  geom_histogram(binwidth = 5, color = "white") +
+  facet_wrap(~colony, ncol = 1, scales = "free_y") +
+  labs(
+    title = "Seal length distribution in hunted samples by colony and sex",
+    subtitle = "Colonies ordered from north to south",
+    x = "Body length (cm)",
+    y = "Samples",
+    fill = "Sex"
+  )
+
+length_by_year <- sample_meta_main |>
+  filter(!is.na(body_length_cm)) |>
+  ggplot(aes(year, body_length_cm)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  labs(
+    title = "Seal length over time",
+    x = "Year",
+    y = "Body length (cm)"
+  )
+
+sex_balance <- sample_meta_main |>
+  filter(!is.na(sex)) |>
+  count(sex) |>
+  ggplot(aes(sex, n, fill = sex)) +
+  geom_col(show.legend = FALSE) +
+  labs(
+    title = "Sex balance in hunted samples",
+    x = NULL,
+    y = "Samples"
+  )
+
+sex_balance_colony <- sample_meta_main |>
+  filter(!is.na(sex)) |>
+  mutate(colony = factor(colony, levels = colony_keep)) |>
+  count(colony, sex, name = "n") |>
+  group_by(colony) |>
+  mutate(
+    total_n = sum(n),
+    prop = n / total_n
+  ) |>
+  ungroup() |>
+  ggplot(aes(colony, prop, fill = sex)) +
+  geom_col() +
+  geom_text(
+    data = ~ distinct(.x, colony, total_n),
+    aes(x = colony, y = 1.02, label = total_n),
+    inherit.aes = FALSE,
+    vjust = 0
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, 1.08),
+    expand = c(0, 0)
+  ) +
+  labs(
+    title = "Relative sex composition by colony",
+    subtitle = "Numbers above bars show total hunted samples with known sex",
+    x = NULL,
+    y = "Relative abundance",
+    fill = "Sex"
+  )
+
+family_support_plot <- family_support_grouped |>
+  mutate(family = fct_reorder(as.character(family), total_biomass_kg)) |>
+  ggplot(aes(total_biomass_kg, family)) +
+  geom_col(fill = "steelblue") +
+  labs(
+    title = "Grouped prey families retained for modelling",
+    subtitle = "Same dominant-family set as 03b",
+    x = "Total biomass (kg)",
+    y = NULL
+  )
+
+missing_covariates
+hunt_samples_by_year
+age_length_plot
+length_histogram
+length_histogram_sex_colony
+length_by_year
+sex_balance
+sex_balance_colony
+family_support_plot
+```
+
+## Prediction grid
+
+```{r prediction-grid}
+d <- diet_model
+
+hull_idx <- chull(d$X, d$Y)
+hull_coords <- cbind(d$X[hull_idx], d$Y[hull_idx])
+hull_coords <- rbind(hull_coords, hull_coords[1, ])
+
+sp_poly <- sp::SpatialPolygons(
+  list(sp::Polygons(list(sp::Polygon(hull_coords)), ID = 1))
+)
+
+sp_poly_df <- sp::SpatialPolygonsDataFrame(
+  sp_poly,
+  data = data.frame(ID = 1)
+)
+
+cell_width <- 0.5
+
+pred_grid_base <- expand.grid(
+  X = seq(min(d$X), max(d$X), cell_width),
+  Y = seq(min(d$Y), max(d$Y), cell_width),
+  year = seq(min(d$year), max(d$year))
+)
+
+sp::coordinates(pred_grid_base) <- c("X", "Y")
+
+inside <- !is.na(sp::over(pred_grid_base, as(sp_poly_df, "SpatialPolygons")))
+
+pred_grid_base <- pred_grid_base[inside, ]
+
+pred_grid_base <- as.data.frame(pred_grid_base) |>
+  mutate(
+    year_ct = year - year_center,
+    year_f = factor(year, levels = levels(diet_model$year_f))
+  )
+
+land <- ne_countries(scale = "large", returnclass = "sf") |>
+  st_transform(32632)
+```
+
+## Mesh
+
+```{r mesh}
+mesh_cutoff_km <- 0.5
+
+mesh <- make_mesh(diet_model, xy_cols = c("X", "Y"), type = "cutoff", cutoff = mesh_cutoff_km)
+
+plot(mesh)
+```
+
+## Candidate models: length only
+
+```{r fit-length-models}
+#| cache: true
+m1_len <- sdmTMB(
+  formula = biomass_kg ~ 0 + family + s(year_ct, by = family),
+  data = diet_model,
+  family = tweedie(),
+  mesh = mesh,
+  spatial = "on"
+)
+
+m2_len <- sdmTMB(
+  formula = biomass_kg ~ 0 + family + s(year_ct, by = family) + s(body_length_cm, by = family),
+  data = diet_model,
+  family = tweedie(),
+  mesh = mesh,
+  spatial = "on"
+)
+
+m3_len <- sdmTMB(
+  formula = biomass_kg ~ 0 + family + s(year_ct, by = family) + s(body_length_cm, by = family),
+  data = diet_model,
+  family = tweedie(),
+  mesh = mesh,
+  spatial = "off",
+  spatial_varying = ~0 + family
+)
+
+m4_len <- sdmTMB(
+  formula = biomass_kg ~ 0 + family + s(year_ct, by = family) + s(body_length_cm, by = family),
+  data = diet_model,
+  family = tweedie(),
+  mesh = mesh,
+  spatial = "off",
+  time = "year",
+  spatiotemporal = "iid",
+  spatial_varying = ~0 + family
+)
+
+aic_length <- tibble(
+  model = c("m1_len", "m2_len", "m3_len", "m4_len"),
+  aic = c(AIC(m1_len), AIC(m2_len), AIC(m3_len), AIC(m4_len))
+) |>
+  arrange(aic)
+
+aic_length
+```
+
+## Predictions over seal length
+
+```{r predict-length}
+best_length_name <- aic_length$model[[1]]
+
+best_length_model <- switch(best_length_name,
+  m1_len = m1_len,
+  m2_len = m2_len,
+  m3_len = m3_len,
+  m4_len = m4_len
+)
+
+length_seq <- seq(
+  quantile(diet_model$body_length_cm, 0.1, na.rm = TRUE),
+  quantile(diet_model$body_length_cm, 0.9, na.rm = TRUE),
+  length.out = 60
+)
+
+pred_year <- round(median(sort(unique(diet_model$year))))
+
+nd_length <- expand_grid(
+  body_length_cm = length_seq,
+  family = factor(family_levels, levels = family_levels)
+) |>
+  mutate(
+    year = pred_year,
+    year_ct = year - year_center,
+    year_f = factor(year, levels = levels(diet_model$year_f)),
+    X = median(diet_model$X, na.rm = TRUE),
+    Y = median(diet_model$Y, na.rm = TRUE)
+  )
+
+p_length <- predict(best_length_model, newdata = nd_length, re_form = NA, se_fit = TRUE)
+
+length_curves <- nd_length |>
+  bind_cols(as_tibble(p_length) |> select(est, est_se)) |>
+  mutate(
+    est = exp(est),
+    lwr = exp(est - 1.96 * est_se),
+    upr = exp(est + 1.96 * est_se)
+  ) |>
+  mutate(prop = est / sum(est), .by = body_length_cm)
+
+length_curve_plot <- length_curves |>
+  ggplot(aes(body_length_cm, prop, color = family, fill = family)) +
+  geom_area(position = "stack", alpha = 0.8) +
+  scale_color_manual(values = family_palette) +
+  scale_fill_manual(values = family_palette) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Predicted diet composition over seal length",
+    subtitle = paste("Best length model:", best_length_name, "| Year fixed at", pred_year),
+    x = "Body length (cm)",
+    y = "Predicted family proportion",
+    fill = "Family",
+    color = "Family"
+  )
+
+length_curve_plot
+```
+
+## Gadidae questions: sex, length, year, space
+
+This section fits one joint family model on all retained family groups, converts predictions to diet composition, and then filters the prediction output to `Gadidae`.
+
+```{r fit-gadidae-models}
+#| cache: true
+diet_model_gad <- diet_model_sex |>
+  mutate(body_length_ct = body_length_cm - mean(body_length_cm, na.rm = TRUE))
+
+mesh_gad <- make_mesh(diet_model_gad, xy_cols = c("X", "Y"), type = "cutoff", cutoff = mesh_cutoff_km)
+
+# Do females and males differ in diet choice? After accounting for length
+g1 <- sdmTMB(
+  formula = biomass_kg ~ sex*family + body_length_cm + (1|year_f),
+  data = diet_model_gad,
+  mesh = mesh_gad,
+  family = tweedie(),
+  spatial = "on"
+)
+
+# Length-specific diet  
+g2 <- sdmTMB(
+  formula = biomass_kg ~ sex*family + body_length_cm*family + (1|year_f),
+  data = diet_model_gad,
+  mesh = mesh_gad,
+  family = tweedie(),
+  spatial = "on"
+)
+
+# Length-specific diet  (nonlinear ontogenetic diet change)
+g3 <- sdmTMB(
+  formula = biomass_kg ~ sex*family + s(body_length_cm, by = family) + (1|year_f),
+  data = diet_model_gad,
+  mesh = mesh_gad,
+  family = tweedie(),
+  spatial = "on"
+)
+
+# Different length effects by sex
+g4 <- sdmTMB(
+  formula = biomass_kg ~ sex*family + body_length_cm*sex + (1|year_f),
+  data = diet_model_gad,
+  mesh = mesh_gad,
+  family = tweedie(),
+  spatial = "on"
+)
+
+# spatial fields by family
+g5 <- sdmTMB(
+  formula = biomass_kg ~ sex*family + body_length_cm + (1|year_f),
+  data = diet_model_gad,
+  mesh = mesh_gad,
+  family = tweedie(),
+  spatial = "off",
+  spatial_varying = ~ 0 + family
+)
+
+# spatial fields by family & bodylength*family
+g6 <- sdmTMB(
+  formula = biomass_kg ~ sex*family + body_length_cm*family + (1|year_f),
+  data = diet_model_gad,
+  mesh = mesh_gad,
+  family = tweedie(),
+  spatial = "off",
+  spatial_varying = ~ 0 + family
+)
+
+# threeway interaction
+g7 <- sdmTMB(
+  formula = biomass_kg ~ body_length_cm*family*sex + (1|year_f),
+  data = diet_model_gad,
+  mesh = mesh_gad,
+  family = tweedie(),
+  spatial = "off",
+  spatial_varying = ~ 0 + family
+)
+
+# g6 but with ST fields
+g8 <- sdmTMB(
+  formula = biomass_kg ~ sex*family + body_length_cm*family + (1|year_f),
+  data = diet_model_gad,
+  mesh = mesh_gad,
+  family = tweedie(),
+  spatial = "off",
+  spatiotemporal = "iid",
+  time = "year", 
+  spatial_varying = ~ 0 + family
+)
+
+# Does the effect of sex differ between months?
+g9 <- sdmTMB(
+  formula = biomass_kg ~ sex*family + quarter_f*sex + body_length_cm*family + (1|year_f),
+  data = diet_model_gad,
+  mesh = mesh_gad,
+  family = tweedie(),
+  spatial = "off",
+  spatial_varying = ~ 0 + family
+)
+
+# Simple season
+g10 <- sdmTMB(
+  formula = biomass_kg ~ sex*family + quarter_f + body_length_cm*family + (1|year_f),
+  data = diet_model_gad,
+  mesh = mesh_gad,
+  family = tweedie(),
+  spatial = "off",
+  spatial_varying = ~ 0 + family
+)
+
+AIC(g1, g2, g3, g4, g5, g6, g7, g8, g9, g10, g11) |>
+  arrange(AIC)
+
+g9
+
+# season effects
+nd <- expand_grid(
+  quarter_f = as.factor(c(1:4)),
+  family = unique(diet_model_gad$family),
+  sex = unique(diet_model_gad$sex)) |> 
+  mutate(body_length_cm = 175)
+
+p <- predict(g9, newdata = nd, re_form = NA, re_form_iid = NA)
+
+ggplot(p, aes(sex, exp(est), fill = family)) + 
+  facet_wrap(~quarter_f, ncol = 4) +
+  geom_bar(stat = "identity")
+
+ggplot(p, aes(as.numeric(as.character(quarter_f)), exp(est), fill = family)) + 
+  facet_wrap(~sex, ncol = 4) +
+  geom_bar(stat = "identity")
+
+qqnorm(residuals(g9)); qqline(residuals(g9))
+
+
+# smooth season by sex
+nd <- expand_grid(
+  month = unique(diet_model_gad$month),
+  #family = unique(diet_model_gad$family),
+  sex = unique(diet_model_gad$sex)) |> 
+  mutate(
+    body_length_cm = 130,
+    family = "Gadidae"
+    )
+
+p <- predict(g11, newdata = nd, re_form = NA, re_form_iid = NA)
+
+ggplot(p, aes(month, exp(est), color = sex)) + 
+  geom_line()
+
+
+
+
+
+
+plot(ggeffects::ggpredict(g9, c("family", "sex", "quarter_f"))) #+
+  #coord_flip() + 
+  #facet_wrap(~quarter_f, scales = "fixed")
+
+plot(ggeffects::ggpredict(g6, c("family", "sex")))
+
+plot(ggeffects::ggpredict(g6, c("body_length_cm", "family")))
+
+plot(ggeffects::ggpredict(g6, c("body_length_cm", "family", "sex")))
+
+diet_model_gad |> 
+  ggplot(aes(body_length_cm, fill = sex)) +
+  geom_histogram()
+  
+```
+
+## Do females or males eat more Gadidae?
+
+```{r gadidae-sex}
+ref_length <- median(diet_model_gad$body_length_cm, na.rm = TRUE)
+ref_year <- pred_year
+
+nd_g1 <- expand_grid(
+  sex = factor(c("Female", "Male"), levels = levels(diet_model_gad$sex)),
+  family = factor(family_levels, levels = family_levels)
+) |>
+  mutate(
+    body_length_cm = ref_length,
+    body_length_ct = body_length_cm - mean(diet_model_gad$body_length_cm, na.rm = TRUE),
+    year = ref_year,
+    year_ct = year - year_center,
+    year_f = factor(year, levels = levels(diet_model_gad$year_f)),
+    X = median(diet_model_gad$X, na.rm = TRUE),
+    Y = median(diet_model_gad$Y, na.rm = TRUE)
+  )
+
+p_g1 <- predict(g1, newdata = nd_g1, re_form = NA, se_fit = TRUE)
+
+gad_sex <- nd_g1 |>
+  bind_cols(as_tibble(p_g1) |> select(est, est_se)) |>
+  mutate(
+    biomass = exp(est),
+    prop = biomass / sum(biomass),
+    lwr = exp(est - 1.96 * est_se),
+    upr = exp(est + 1.96 * est_se),
+    .by = sex
+  ) |>
+  filter(family == "Gadidae")
+
+gad_sex |>
+  ggplot(aes(sex, prop, fill = sex)) +
+  geom_col(width = 0.6, show.legend = FALSE) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Predicted Gadidae proportion by sex",
+    subtitle = paste("Model g1 | Length fixed at", round(ref_length, 1), "cm and year", ref_year),
+    x = NULL,
+    y = "Predicted Gadidae proportion"
+  )
+```
+
+## Does that depend on seal length?
+
+```{r gadidae-length}
+nd_g2_length <- expand_grid(
+  body_length_cm = length_seq,
+  sex = factor(c("Female", "Male"), levels = levels(diet_model_gad$sex)),
+  family = factor(family_levels, levels = family_levels)
+) |>
+  mutate(
+    year = ref_year,
+    body_length_ct = body_length_cm - mean(diet_model_gad$body_length_cm, na.rm = TRUE),
+    year_ct = year - year_center,
+    year_f = factor(year, levels = levels(diet_model_gad$year_f)),
+    X = median(diet_model_gad$X, na.rm = TRUE),
+    Y = median(diet_model_gad$Y, na.rm = TRUE)
+  )
+
+p_g2_length <- predict(g2, newdata = nd_g2_length, re_form = NA, se_fit = TRUE)
+
+gad_length <- nd_g2_length |>
+  bind_cols(as_tibble(p_g2_length) |> select(est, est_se)) |>
+  mutate(biomass = exp(est)) |>
+  mutate(prop = biomass / sum(biomass), .by = c(body_length_cm, sex)) |>
+  filter(family == "Gadidae")
+
+gad_length |>
+  ggplot(aes(body_length_cm, prop, color = sex)) +
+  geom_line(linewidth = 1) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Predicted Gadidae proportion over seal length",
+    subtitle = paste("Model g2 | Year fixed at", ref_year),
+    x = "Body length (cm)",
+    y = "Predicted Gadidae proportion",
+    color = "Sex"
+  )
+```
+
+## Does that depend on year?
+
+```{r gadidae-year}
+nd_g2_year <- expand_grid(
+  year = sort(unique(diet_model_gad$year)),
+  sex = factor(c("Female", "Male"), levels = levels(diet_model_gad$sex)),
+  family = factor(family_levels, levels = family_levels)
+) |>
+  mutate(
+    body_length_cm = ref_length,
+    body_length_ct = body_length_cm - mean(diet_model_gad$body_length_cm, na.rm = TRUE),
+    year_ct = year - year_center,
+    year_f = factor(year, levels = levels(diet_model_gad$year_f)),
+    X = median(diet_model_gad$X, na.rm = TRUE),
+    Y = median(diet_model_gad$Y, na.rm = TRUE)
+  )
+
+p_g2_year <- predict(g2, newdata = nd_g2_year, re_form = NA, se_fit = TRUE)
+
+gad_year <- nd_g2_year |>
+  bind_cols(as_tibble(p_g2_year) |> select(est, est_se)) |>
+  mutate(biomass = exp(est)) |>
+  mutate(prop = biomass / sum(biomass), .by = c(year, sex)) |>
+  filter(family == "Gadidae")
+
+gad_year |>
+  ggplot(aes(year, prop, color = sex)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.5) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Predicted Gadidae proportion over year",
+    subtitle = paste("Model g2 | Length fixed at", round(ref_length, 1), "cm"),
+    x = "Year",
+    y = "Predicted Gadidae proportion",
+    color = "Sex"
+  )
+```
+
+## Does that depend on space?
+
+```{r gadidae-space}
+map_year <- ref_year
+
+pg_g4 <- pred_grid_base |>
+  filter(year == map_year) |>
+  expand_grid(
+    sex = factor(c("Female", "Male"), levels = levels(diet_model_gad$sex)),
+    family = factor(family_levels, levels = family_levels)
+  ) |>
+  mutate(
+    body_length_cm = ref_length,
+    body_length_ct = body_length_cm - mean(diet_model_gad$body_length_cm, na.rm = TRUE)
+  )
+
+p_g4 <- predict(g4, newdata = pg_g4)
+
+gad_space <- pg_g4 |>
+  bind_cols(as_tibble(p_g4) |> select(est)) |>
+  mutate(biomass = exp(est)) |>
+  mutate(prop = biomass / sum(biomass), .by = c(X, Y, sex)) |>
+  filter(family == "Gadidae")
+
+gad_space |>
+  ggplot(aes(X * 1000, Y * 1000, fill = prop)) +
+  geom_raster() +
+  geom_sf(data = land, fill = "grey90", linewidth = 0.2, inherit.aes = FALSE) +
+  viridis::scale_fill_viridis(labels = scales::percent_format(accuracy = 1)) +
+  coord_sf(
+    crs = 32632,
+    xlim = range(gad_space$X * 1000),
+    ylim = range(gad_space$Y * 1000),
+    expand = FALSE
+  ) +
+  labs(
+    title = "Predicted Gadidae proportion in space",
+    subtitle = paste("Model g4 | Length fixed at", round(ref_length, 1), "cm and year", map_year),
+    x = "Longitude",
+    y = "Latitude",
+    fill = "Gadidae\nproportion"
+  ) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  facet_wrap(~sex)
+```
+
+## Does that depend on year and space together?
+
+```{r gadidae-year-space}
+year_levels <- sort(unique(diet_model_gad$year))
+snap_years <- unique(c(min(year_levels), year_levels[ceiling(length(year_levels) / 2)], max(year_levels)))
+
+pg_g5 <- pred_grid_base |>
+  filter(year %in% snap_years) |>
+  expand_grid(
+    sex = factor(c("Female", "Male"), levels = levels(diet_model_gad$sex)),
+    family = factor(family_levels, levels = family_levels)
+  ) |>
+  mutate(
+    body_length_cm = ref_length,
+    body_length_ct = body_length_cm - mean(diet_model_gad$body_length_cm, na.rm = TRUE)
+  )
+
+p_g5 <- predict(g5, newdata = pg_g5)
+
+gad_year_space <- pg_g5 |>
+  bind_cols(as_tibble(p_g5) |> select(est)) |>
+  mutate(biomass = exp(est)) |>
+  mutate(prop = biomass / sum(biomass), .by = c(X, Y, year, sex)) |>
+  filter(family == "Gadidae")
+
+gad_year_space |>
+  ggplot(aes(X * 1000, Y * 1000, fill = prop)) +
+  geom_raster() +
+  geom_sf(data = land, fill = "grey90", linewidth = 0.2, inherit.aes = FALSE) +
+  viridis::scale_fill_viridis(labels = scales::percent_format(accuracy = 1)) +
+  coord_sf(
+    crs = 32632,
+    xlim = range(gad_year_space$X * 1000),
+    ylim = range(gad_year_space$Y * 1000),
+    expand = FALSE
+  ) +
+  labs(
+    title = "Predicted Gadidae proportion by year and space",
+    subtitle = paste("Model g5 | Length fixed at", round(ref_length, 1), "cm"),
+    x = "Longitude",
+    y = "Latitude",
+    fill = "Gadidae\nproportion"
+  ) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  facet_grid(sex ~ year)
+```
