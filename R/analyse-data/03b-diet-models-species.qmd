@@ -1,0 +1,667 @@
+---
+title: "Harbour Seal Diet Hybrid Prey-Group Models"
+author: "Max Lindmark & Monica Mion"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format:
+  html:
+    toc: true
+    page-layout: full
+    embed-resources: true
+editor: source
+execute:
+  echo: true
+  eval: true
+  warning: false
+  message: false
+  cache: false
+---
+
+## Purpose
+
+This notebook builds a hybrid prey-group modelling pipeline for the harbour seal diet data.
+
+The hybrid approach uses species-level resolution for Gadidae (because of their ecological and policy relevance) while keeping all other prey at the family level used in `03b-diet-models-family.qmd`.
+
+Specifically:
+
+-   Gadidae are split into: Gadus morhua, Merlangius merlangus, Pollachius sp. / Melanogrammus aeglefinus, unidentified Gadidae, and Other Gadidae.
+-   Clupeidae, Pleuronectidae, Gobiidae, and Other remain as grouped families.
+
+This gives 9 prey groups instead of the 5 families used in `03b-diet-models-family.qmd`.
+
+See `decision.md` at the project root for the rationale behind this design choice.
+
+The workflow is:
+
+-   retain colonies through Onsala only,
+-   retain Faeces and Hunt samples only,
+-   build a sample-by-prey-group modelling table with zero expansion,
+-   use 2013-2025 as the main analysis period,
+-   model prey biomass by prey group with collection_method and group-specific smooth year effects
+
+```{r setup}
+library(dplyr)
+library(tidyr)
+library(readr)
+library(readxl)
+library(ggplot2)
+library(forcats)
+library(stringr)
+library(janitor)
+library(sf)
+library(sdmTMB)
+library(purrr)
+library(rnaturalearth)
+library(sf)
+library(ggsidekick)
+
+theme_set(theme_sleek())
+
+home <- here::here()
+
+biomass_file <- file.path(home, "Data", "HS_SKAG_estimated_abundance_biomass_130426.csv")
+ices_areas_file <- file.path(home, "Data", "shapefiles", "ICES_areas", "ICES_Areas_20160601_cut_dense_3857.shp")
+
+colony_keep <- c("Koster", "Väderöarna", "Lysekil", "Marstrand", "Onsala")
+method_keep <- c("Faeces", "Hunt")
+analysis_year_min <- 2013L
+
+# Gadidae species to keep at species level
+gad_species_keep <- c(
+  "Gadus morhua",
+  "Merlangius merlangus",
+  "Pollachius sp. / Melanogrammus aeglefinus",
+  "Gadidae"
+)
+
+# All prey groups in the hybrid resolution
+prey_group_levels <- c(
+  gad_species_keep,
+  "Other Gadidae",
+  "Clupeidae",
+  "Pleuronectidae",
+  "Gobiidae",
+  "Other"
+)
+
+prey_group_palette <- c(
+  "Gadus morhua"                              = "#2E6B1F",
+  "Merlangius merlangus"                      = "#5DAE4A",
+  "Pollachius sp. / Melanogrammus aeglefinus"  = "#A3D977",
+  "Gadidae"                                   = "#3B8C27",
+  "Other Gadidae"                             = "#7EC87E",
+  "Clupeidae"                                 = "#1F5AA6",
+  "Pleuronectidae"                            = "#D94FD3",
+  "Gobiidae"                                  = "#F39C12",
+  "Other"                                     = "#9E4A7A",
+  "Total"                                     = "#000000"
+)
+
+normalize_colony_name <- function(x) {
+  x <- trimws(as.character(x))
+  case_when(
+    grepl("der.*arna", x, ignore.case = TRUE) ~ "Väderöarna",
+    grepl("^Hallands.*der", x, ignore.case = TRUE) ~ "Hallands Väderö",
+    TRUE ~ x
+  )
+}
+```
+
+## Read and harmonize source data
+
+```{r read-data}
+sample_meta_workbook <- read_csv(biomass_file, show_col_types = FALSE) |>
+  clean_names() |>
+  distinct(sample_id, .keep_all = TRUE) |>
+  transmute(
+    sample_id,
+    year_wb = suppressWarnings(as.integer(year)),
+    month_wb = suppressWarnings(as.integer(month)),
+    quarter_wb = suppressWarnings(as.integer(quarter)),
+    latitude_wb = suppressWarnings(as.numeric(latitude)),
+    longitude_wb = suppressWarnings(as.numeric(longitude)),
+    colony_wb = normalize_colony_name(colony),
+    collection_method_wb = if_else(
+      is.na(collection_method) | collection_method == "",
+      "Unknown",
+      as.character(collection_method)
+    )
+  )
+
+diet_raw <- read_csv(biomass_file, show_col_types = FALSE) |>
+  clean_names() |>
+  left_join(sample_meta_workbook, by = "sample_id") |>
+  mutate(
+    year = coalesce(year_wb, suppressWarnings(as.integer(year))),
+    month = coalesce(month_wb, suppressWarnings(as.integer(month))),
+    quarter = coalesce(quarter_wb, suppressWarnings(as.integer(quarter))),
+    latitude = coalesce(latitude_wb, suppressWarnings(as.numeric(latitude))),
+    longitude = coalesce(longitude_wb, suppressWarnings(as.numeric(longitude))),
+    colony = coalesce(colony_wb, normalize_colony_name(colony)),
+    collection_method = coalesce(collection_method_wb, as.character(collection_method)),
+    collection_method = if_else(is.na(collection_method) | collection_method == "", "Unknown", collection_method),
+    colony = if_else(is.na(colony) | colony == "", "Unknown", colony),
+    family = if_else(is.na(family) | family == "", "Unknown", family),
+    prey_species = prey_species_lat,
+    quarter = coalesce(quarter, ((month - 1L) %/% 3L) + 1L)
+  ) |>
+  select(-ends_with("_wb"))
+
+sample_meta_all <- diet_raw |>
+  filter(!is.na(sample_id), !is.na(year), !is.na(latitude), !is.na(longitude)) |>
+  distinct(sample_id, .keep_all = TRUE) |>
+  transmute(
+    sample_id,
+    year,
+    month,
+    quarter,
+    lat = latitude,
+    lon = longitude,
+    collection_method,
+    colony
+  )
+
+# --- Hybrid prey-group assignment ---
+# Gadidae split to species; all other families kept at family level.
+diet_rows_all <- diet_raw |>
+  filter(
+    !is.na(sample_id),
+    !is.na(biomass_not_corrected),
+    !is.na(prey_species),
+    prey_species != "",
+    tolower(prey_species) != "non prey item"
+  ) |>
+  transmute(
+    sample_id,
+    prey_group = case_when(
+      family == "Gadidae" & prey_species %in% gad_species_keep ~ prey_species,
+      family == "Gadidae" ~ "Other Gadidae",
+      family == "Clupeidae" ~ "Clupeidae",
+      family == "Pleuronectidae" ~ "Pleuronectidae",
+      family == "Gobiidae" ~ "Gobiidae",
+      TRUE ~ "Other"
+    ),
+    biomass_kg = biomass_not_corrected / 1000
+  ) |>
+  summarise(biomass_kg = sum(biomass_kg, na.rm = TRUE), .by = c(sample_id, prey_group))
+
+sample_totals_all <- diet_rows_all |>
+  summarise(sum_biomass_kg = sum(biomass_kg, na.rm = TRUE), .by = sample_id)
+
+sample_meta_filtered <- sample_meta_all |>
+  left_join(sample_totals_all, by = "sample_id") |>
+  mutate(sum_biomass_kg = coalesce(sum_biomass_kg, 0)) |>
+  filter(
+    collection_method %in% method_keep,
+    colony %in% colony_keep,
+    sum_biomass_kg > 0
+  )
+
+if (nrow(sample_meta_filtered) == 0) {
+  stop("No samples remain after filtering by colony, method, and positive total biomass.")
+}
+
+analysis_year_max <- max(sample_meta_filtered$year, na.rm = TRUE)
+
+sample_meta_main <- sample_meta_filtered |>
+  filter(year >= analysis_year_min, year <= analysis_year_max)
+
+diet_rows_main <- diet_rows_all |>
+  semi_join(sample_meta_main, by = "sample_id")
+```
+
+## Support summaries and prey-group grouping
+
+```{r support-tables}
+n_main_samples <- nrow(sample_meta_main)
+
+prey_group_support_main <- diet_rows_main |>
+  summarise(
+    total_biomass_kg = sum(biomass_kg, na.rm = TRUE),
+    n_samples_present = n_distinct(sample_id[biomass_kg > 0]),
+    .by = prey_group
+  ) |>
+  mutate(
+    prevalence = n_samples_present / n_main_samples,
+    zero_rate = 1 - prevalence,
+    prey_group = factor(prey_group, levels = prey_group_levels)
+  ) |>
+  arrange(prey_group)
+```
+
+```{r build-model-table}
+year_center <- mean(sample_meta_main$year, na.rm = TRUE)
+
+diet_model <- sample_meta_main |>
+  select(sample_id, year, month, quarter, lat, lon, collection_method, colony, sum_biomass_kg) |>
+  tidyr::expand_grid(prey_group = prey_group_levels) |>
+  left_join(diet_rows_main, by = c("sample_id", "prey_group")) |>
+  mutate(
+    biomass_kg = coalesce(biomass_kg, 0),
+    present = as.integer(biomass_kg > 0),
+    prop_biomass = if_else(sum_biomass_kg > 0, biomass_kg / sum_biomass_kg, 0),
+    year_ct = year - year_center,
+    collection_method = factor(collection_method, levels = method_keep),
+    colony = factor(colony, levels = colony_keep),
+    prey_group = factor(prey_group, levels = prey_group_levels),
+    year_f = as.factor(year),
+    quarter_f = factor(quarter),
+    month_f = factor(month)
+  ) |>
+  add_utm_columns(ll_names = c("lon", "lat"))
+
+diet_model |>
+  summarise(
+    n_samples = n_distinct(sample_id),
+    n_rows = n(),
+    min_year = min(year),
+    max_year = max(year),
+    n_prey_groups = n_distinct(prey_group)
+  )
+```
+
+## Support diagnostics
+
+```{r support-plots}
+samples_by_year_method <- sample_meta_main |>
+  count(year, collection_method, name = "n_samples")
+
+samples_by_colony_method <- sample_meta_main |>
+  count(colony, collection_method, name = "n_samples")
+
+sample_map <- sample_meta_main |>
+  ggplot(aes(lon, lat, colour = collection_method)) +
+  geom_point(alpha = 0.8, size = 2) +
+  coord_sf() +
+  labs(
+    title = "Retained samples in the main analysis period",
+    subtitle = "Colonies through Onsala only; methods restricted to Faeces and Hunt",
+    x = "Longitude",
+    y = "Latitude",
+    colour = "Method"
+  )
+
+plot_year_method <- samples_by_year_method |>
+  ggplot(aes(year, n_samples, fill = collection_method)) +
+  geom_col(position = "stack") +
+  labs(
+    title = "Samples by year and collection method",
+    x = "Year",
+    y = "Samples",
+    fill = "Method"
+  )
+
+plot_colony_method <- samples_by_colony_method |>
+  ggplot(aes(colony, n_samples, fill = collection_method)) +
+  geom_col(position = "stack") +
+  labs(
+    title = "Samples by colony and collection method",
+    subtitle = "Colony is retained for support diagnostics only",
+    x = NULL,
+    y = "Samples",
+    fill = "Method"
+  )
+
+plot_prey_group_support <- prey_group_support_main |>
+  mutate(prey_group = fct_reorder(as.character(prey_group), total_biomass_kg)) |>
+  ggplot(aes(total_biomass_kg, prey_group)) +
+  geom_col(fill = "steelblue") +
+  labs(
+    title = "Hybrid prey groups retained for modelling",
+    subtitle = "Gadidae split to species; other families grouped",
+    x = "Total biomass (kg)",
+    y = NULL
+  )
+
+plot_zero_rate <- prey_group_support_main |>
+  mutate(prey_group = fct_reorder(as.character(prey_group), zero_rate)) |>
+  ggplot(aes(zero_rate, prey_group)) +
+  geom_col(fill = "tomato") +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Zero proportion by prey group",
+    x = "Zero proportion",
+    y = NULL
+  )
+
+sample_map
+plot_year_method
+plot_colony_method
+plot_prey_group_support
+plot_zero_rate
+```
+
+
+
+```{r}
+# Gridded map prediction
+d <- diet_model
+
+x <- d$X
+y <- d$Y
+z <- chull(x, y)
+
+coords <- cbind(x[z], y[z])
+
+coords <- rbind(coords, coords[1, ])
+
+plot(coords[, 1] ~ coords[, 2]) # plot data
+
+sp_poly <- sp::SpatialPolygons(
+  list(sp::Polygons(list(sp::Polygon(coords)), ID = 1))
+)
+
+sp_poly_df <- sp::SpatialPolygonsDataFrame(sp_poly,
+  data = data.frame(ID = 1)
+)
+cell_width <- 0.5
+
+pred_grid <- expand.grid(
+  X = seq(min(d$X), max(d$X), cell_width),
+  Y = seq(min(d$Y), max(d$Y), cell_width),
+  year = c(min(d$year):max(d$year))
+)
+
+sp::coordinates(pred_grid) <- c("X", "Y")
+
+inside <- !is.na(sp::over(pred_grid, as(sp_poly_df, "SpatialPolygons")))
+
+pred_grid <- pred_grid[inside, ]
+
+pred_grid <- as.data.frame(pred_grid) |> 
+  mutate(collection_method = "Hunt",
+         year_ct = year - year_center,
+         year_f = as.factor(year))
+
+pred_grid <- replicate_df(pred_grid,
+    time_name = "prey_group",
+    time_values = unique(d$prey_group)
+    )
+```
+
+## Map plot
+
+```{r}
+# Add coastline
+land <- ne_countries(scale = "large", returnclass = "sf") |>
+  st_transform(32632)
+```
+
+## Mesh
+
+```{r mesh}
+mesh_cutoff_km <- 0.5
+
+mesh <- make_mesh(diet_model, xy_cols = c("X", "Y"), type = "cutoff", cutoff = mesh_cutoff_km)
+
+plot(mesh)
+```
+
+## Candidate models
+
+```{r fit-models}
+#| cache: true
+# Spatial no time
+m1 <- sdmTMB(
+  formula = biomass_kg ~ 0 + prey_group + collection_method,
+  data = diet_model,
+  family = tweedie(),
+  mesh = mesh,
+  spatial = "on"
+)
+
+# smooth year by prey_group
+m2 <- sdmTMB(
+  formula = biomass_kg ~ 0 + prey_group + collection_method + s(year_ct, by = prey_group),
+  data = diet_model,
+  family = tweedie(),
+  mesh = mesh,
+  spatial = "on"
+)
+
+# SVC prey_group + year smooth
+m3 <- sdmTMB(
+  formula = biomass_kg ~ 0 + prey_group + collection_method + s(year_ct, by = prey_group),
+  data = diet_model,
+  family = tweedie(),
+  mesh = mesh,
+  spatial = "off",
+  spatial_varying = ~0 + prey_group
+)
+
+# SVC prey_group + year smooth + iid
+m4 <- sdmTMB(
+  formula = biomass_kg ~ 0 + prey_group + collection_method + s(year_ct, by = prey_group),
+  data = diet_model,
+  family = tweedie(),
+  mesh = mesh,
+  spatial = "off",
+  time = "year",
+  spatiotemporal = "iid",
+  spatial_varying = ~0 + prey_group
+)
+
+# factor year by prey_group, collection by prey_group, no st
+m5 <- sdmTMB(
+  formula = biomass_kg ~ 0 + prey_group + collection_method + collection_method:prey_group + year_f:prey_group,
+  data = diet_model,
+  family = tweedie(),
+  mesh = mesh,
+  spatial = "off",
+  time = "year",
+  spatiotemporal = "off",
+  spatial_varying = ~0 + prey_group
+)
+
+# factor year by prey_group, collection by prey_group, iid st
+m6 <- sdmTMB(
+  formula = biomass_kg ~ 0 + prey_group + collection_method + collection_method:prey_group + year_f:prey_group,
+  data = diet_model,
+  family = tweedie(),
+  mesh = mesh,
+  spatial = "off",
+  time = "year",
+  spatiotemporal = "iid",
+  spatial_varying = ~0 + prey_group
+)
+
+# SVC prey_group, random walk time by prey_group
+AIC(m1, m2, m3, m4, m5, m6) |> arrange(AIC)
+```
+
+```{r}
+m6
+sanity(m6)
+
+# Predict over time
+ndt <- tibble(
+  expand_grid(
+    year = unique(diet_model$year),
+    prey_group = unique(diet_model$prey_group)))  |> 
+  mutate(collection_method = "Hunt",
+         year_f = as.factor(year),
+         year = round(year))
+  
+p <- predict(m6, newdata = ndt, re_form = NA, se_fit = TRUE)
+
+tot_pred <- predict(m6, newdata = ndt, re_form = NA, nsim = 500)
+
+tot_pred <- tot_pred |> 
+  as.data.frame() |> 
+  bind_cols(ndt) |> 
+  pivot_longer(cols = starts_with("V"), names_to = "sim") 
+
+tot_pred |> 
+  filter(sim == "V1" & year == 2024)
+
+tot <- tot_pred |> 
+  mutate(value = exp(value)) |> 
+  summarise(sum = sum(value), .by = c(year, sim)) |> 
+  summarise(est = median(sum),
+            lwr = quantile(sum, probs = 0.05),
+            upr = quantile(sum, probs = 0.95), 
+            sd = sd(sum),
+            .by = year) |> 
+  mutate(prey_group = "Total")
+
+p |> 
+  mutate(lwr = exp(est - 1.96*est_se),
+         upr = exp(est + 1.96*est_se),
+         est = exp(est)) |> 
+  bind_rows(tot) |> 
+  ggplot(aes(year, est, color = prey_group, fill = prey_group)) + 
+  geom_ribbon(aes(ymin = lwr, ymax = upr),
+              alpha = 0.3, color = NA) +
+  scale_x_continuous(breaks = seq(2012, 2025, by = 3)) +
+  scale_color_manual(values = prey_group_palette) +
+  scale_fill_manual(values = prey_group_palette) +
+  theme(legend.position = "right") +
+  guides(fill = "none") +
+  labs(y = "Kg/sample", color = "Prey group") +
+  facet_wrap(~prey_group, scales = "free") +
+  geom_line()
+
+# Significant increase in total prey? - NO!
+# Use 1/sd as weights in linear regression!
+mod <- lm(est ~ year,
+          weights = 1/sd,
+          data = tot)
+
+summary(mod)
+
+# Plot proportion over time
+p |> 
+  mutate(sum = sum(exp(est)), 
+         prop = exp(est)/sum,
+         .by = c(year)) |> 
+  ggplot(aes(year, prop, color = prey_group, fill = prey_group)) + 
+  scale_x_continuous(breaks = seq(2012, 2025, by = 3)) +
+  scale_color_manual(values = prey_group_palette) +
+  scale_fill_manual(values = prey_group_palette) +
+  coord_cartesian(expand = 0) +
+  geom_area()
+```
+
+```{r}
+# Predict!
+pg <- predict(m6, newdata = pred_grid)
+
+# Plot SVCs
+pg |> 
+  filter(year == 2013) |> 
+  pivot_longer(starts_with("zeta_s_prey_group"),
+               names_to = "var") |> 
+  mutate(var = str_remove(var, "zeta_s_prey_group")) |> 
+  ggplot(aes(X*1000, Y*1000, fill = value)) +
+  geom_raster() +
+  facet_wrap(~var, ncol = 5) +
+  geom_sf(data = land, fill = "grey90", linewidth = 0.2, inherit.aes = FALSE) +
+    coord_sf(
+    crs = 32632,
+    xlim = range(pg$X*1000),
+    ylim = range(pg$Y*1000),
+    expand = FALSE
+  ) +
+  labs(x = "Longitude", y = "Latitude") +
+  theme(axis.text.x = element_text(angle = 90)) +
+  scale_fill_gradient2()
+
+# Plot spatial predictions in a given year
+pg |> 
+  filter(year == 2013) |> 
+  ggplot(aes(X*1000, Y*1000, fill = exp(est))) +
+  geom_raster() +
+  geom_sf(data = land, fill = "grey90", linewidth = 0.2, inherit.aes = FALSE) +
+  viridis::scale_fill_viridis(trans = "sqrt") +
+  coord_sf(
+    crs = 32632,
+    xlim = range(pg$X*1000),
+    ylim = range(pg$Y*1000),
+    expand = FALSE
+  ) +
+  labs(x = "Longitude", y = "Latitude") +
+  theme(axis.text.x = element_text(angle = 90)) +
+  facet_wrap(~prey_group, ncol = 5)
+
+# Now do by year for cod
+pg |> 
+  filter(prey_group == "Gadus morhua") |> 
+  ggplot(aes(X*1000, Y*1000, fill = exp(est))) +
+  geom_raster() +
+  geom_sf(data = land, fill = "grey90", linewidth = 0.2, inherit.aes = FALSE) +
+  viridis::scale_fill_viridis(trans = "sqrt") +
+  coord_sf(
+    crs = 32632,
+    xlim = range(pg$X*1000),
+    ylim = range(pg$Y*1000),
+    expand = FALSE
+  ) +
+  labs(x = "Longitude", y = "Latitude") +
+  guides(fill = guide_colorbar(position = "inside")) +
+  theme(axis.text.x = element_text(angle = 90),
+        legend.position.inside = c(0.95, 0.2)) +
+  facet_wrap(~year, ncol = 7)
+
+# ... and whiting
+pg |> 
+  filter(prey_group == "Merlangius merlangus") |> 
+  ggplot(aes(X*1000, Y*1000, fill = exp(est))) +
+  geom_raster() +
+  geom_sf(data = land, fill = "grey90", linewidth = 0.2, inherit.aes = FALSE) +
+  viridis::scale_fill_viridis(trans = "sqrt") +
+  coord_sf(
+    crs = 32632,
+    xlim = range(pg$X*1000),
+    ylim = range(pg$Y*1000),
+    expand = FALSE
+  ) +
+  labs(x = "Longitude", y = "Latitude") +
+  guides(fill = guide_colorbar(position = "inside")) +
+  theme(axis.text.x = element_text(angle = 90),
+        legend.position.inside = c(0.95, 0.2)) +
+  facet_wrap(~year, ncol = 7)
+
+# ... and clupeids (kept at family level)
+pg |> 
+  filter(prey_group == "Clupeidae") |> 
+  ggplot(aes(X*1000, Y*1000, fill = exp(est))) +
+  geom_raster() +
+  geom_sf(data = land, fill = "grey90", linewidth = 0.2, inherit.aes = FALSE) +
+  viridis::scale_fill_viridis(trans = "sqrt") +
+  coord_sf(
+    crs = 32632,
+    xlim = range(pg$X*1000),
+    ylim = range(pg$Y*1000),
+    expand = FALSE
+  ) +
+  labs(x = "Longitude", y = "Latitude") +
+  guides(fill = guide_colorbar(position = "inside")) +
+  theme(axis.text.x = element_text(angle = 90),
+        legend.position.inside = c(0.95, 0.2)) +
+  facet_wrap(~year, ncol = 7)
+```
+
+Plot effect of collection method:
+
+```{r}
+nd_col <- tibble(
+  expand_grid(
+    collection_method = unique(diet_model$collection_method),
+    prey_group = unique(diet_model$prey_group)
+  )) |> 
+  mutate(year = 2013,
+         year_f = as.factor(year))
+
+pcol <- predict(m6, newdata = nd_col, se_fit = TRUE, re_form = NA)
+
+ggplot(pcol, aes(exp(est), prey_group, color = collection_method)) + 
+  geom_point(position = position_dodge(width = 0.2)) + 
+  geom_errorbar(aes(xmin = exp(est - 1.96*est_se),
+                    xmax = exp(est + 1.96*est_se)),
+                width = 0,
+                position = position_dodge(width = 0.2))
+```
+
+
+
+
