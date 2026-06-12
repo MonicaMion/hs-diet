@@ -529,7 +529,6 @@ prey_group_support
 ```
 
 ```{r fit-hybrid-models}
-#| cache: true
 mesh_hybrid <- make_mesh(diet_model_hybrid, xy_cols = c("X", "Y"), type = "cutoff", cutoff = mesh_cutoff_km)
 
 h1 <- sdmTMB(
@@ -612,7 +611,8 @@ h9 <- sdmTMB(
 )
 
 h10 <- sdmTMB(
-  formula = biomass_kg ~ sex * prey_group + quarter_f + body_length_cm * prey_group + (1 | year_f),
+  formula = biomass_kg ~ sex * prey_group + quarter_f + 
+    body_length_cm * prey_group + (1 | year_f),
   data = diet_model_hybrid,
   mesh = mesh_hybrid,
   family = tweedie(),
@@ -620,6 +620,16 @@ h10 <- sdmTMB(
   spatial_varying = ~ 0 + prey_group
 )
 
+h11 <- sdmTMB(
+  formula = biomass_kg ~ sex * prey_group + quarter_f * sex + body_length_cm * prey_group + body_length_cm * sex + (1 | year_f),
+  data = diet_model_hybrid,
+  mesh = mesh_hybrid,
+  family = tweedie(),
+  spatial = "off",
+  spatial_varying = ~ 0 + prey_group
+)
+
+AIC(h9, h11)
 AIC(h1, h2, h3, h4, h5, h6, h7, h8, h9, h10) |>
   arrange(AIC)
 ```
@@ -632,10 +642,10 @@ pred_length_hybrid <- pred_length_common
 nd_hybrid <- expand_grid(
   quarter_f = factor(c(1:4), levels = levels(diet_model_hybrid$quarter_f)),
   prey_group = factor(prey_group_levels, levels = prey_group_levels),
-  sex = unique(diet_model_hybrid$sex)
+  sex = unique(diet_model_hybrid$sex),
+  body_length_cm = c(80, 110, 140)
 ) |>
   mutate(
-    body_length_cm = pred_length_hybrid,
     year = pred_year_hybrid,
     year_ct = year - year_center,
     year_f = factor(year, levels = levels(diet_model_hybrid$year_f)),
@@ -643,17 +653,17 @@ nd_hybrid <- expand_grid(
     Y = median(diet_model_hybrid$Y, na.rm = TRUE)
   )
 
-p_hybrid <- predict(h9, newdata = nd_hybrid, re_form = NA, re_form_iid = NA)
+p_hybrid <- predict(h11, newdata = nd_hybrid, re_form = NA, re_form_iid = NA)
 
 ggplot(p_hybrid, aes(sex, exp(est), fill = prey_group)) +
-  facet_wrap(~quarter_f, ncol = 4) +
+  facet_grid(body_length_cm ~ quarter_f) +
   geom_bar(stat = "identity")
 
 ggplot(p_hybrid, aes(as.numeric(as.character(quarter_f)), exp(est), fill = prey_group)) +
   facet_wrap(~sex, ncol = 4) +
   geom_bar(stat = "identity")
 
-qqnorm(residuals(h9)); qqline(residuals(h9))
+qqnorm(residuals(h11)); qqline(residuals(h11))
 
 # Quarter effect for aggregated gadid prey by sex at the same reference seal and year.
 nd_hybrid_gad <- expand_grid(
@@ -670,7 +680,7 @@ nd_hybrid_gad <- expand_grid(
     Y = median(diet_model_hybrid$Y, na.rm = TRUE)
   )
 
-p_hybrid_gad <- predict(h9, newdata = nd_hybrid_gad, re_form = NA, re_form_iid = NA)
+p_hybrid_gad <- predict(h11, newdata = nd_hybrid_gad, re_form = NA, re_form_iid = NA)
 
 hybrid_gad_quarter <- nd_hybrid_gad |>
   bind_cols(as_tibble(p_hybrid_gad) |> select(est)) |>
@@ -680,12 +690,12 @@ hybrid_gad_quarter <- nd_hybrid_gad |>
 ggplot(hybrid_gad_quarter, aes(as.numeric(as.character(quarter_f)), biomass, color = sex)) +
   geom_line()
 
-plot(ggeffects::ggpredict(h9, c("prey_group", "sex", "quarter_f"))) +
+plot(ggeffects::ggpredict(h11, c("prey_group", "sex", "quarter_f"))) +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
-plot(ggeffects::ggpredict(h6, c("prey_group", "sex"))) +
+plot(ggeffects::ggpredict(h11, c("prey_group", "sex"))) +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
-plot(ggeffects::ggpredict(h6, c("body_length_cm", "prey_group")))
-plot(ggeffects::ggpredict(h6, c("body_length_cm", "prey_group", "sex")))
+plot(ggeffects::ggpredict(h9, c("body_length_cm", "prey_group")))
+plot(ggeffects::ggpredict(h9, c("body_length_cm", "prey_group", "sex")))
 
 diet_model_hybrid |>
   distinct(sample_id, body_length_cm, sex) |>
@@ -696,6 +706,101 @@ diet_model_hybrid |>
   distinct(sample_id, month, sex) |>
   ggplot(aes(as.factor(month), fill = sex)) +
   geom_bar()
+```
+
+## Predict with sims to get uncertainty on prey, sex and quarter
+
+```{r}
+nd_hybrid_long <- expand_grid(
+  quarter_f = factor(c(1:4), levels = levels(diet_model_hybrid$quarter_f)),
+  prey_group = factor(prey_group_levels, levels = prey_group_levels),
+  body_length_cm = seq(
+    min(diet_model_hybrid$body_length_cm), 
+    max(diet_model_hybrid$body_length_cm),
+    length.out = 30),
+  sex = unique(diet_model_hybrid$sex)
+) |>
+  mutate(
+    year = pred_year_hybrid,
+    year_ct = year - year_center,
+    year_f = factor(year, levels = levels(diet_model_hybrid$year_f)),
+    X = median(diet_model_hybrid$X, na.rm = TRUE),
+    Y = median(diet_model_hybrid$Y, na.rm = TRUE)
+  )
+
+
+pred_sims <- predict(
+  h11, newdata = nd_hybrid_long, 
+  re_form = NA, re_form_iid = NA, 
+  nsim = 1000) |> 
+  as.data.frame(row.names = FALSE)
+
+pred_sims_df <- nd_hybrid_long |> 
+  bind_cols(pred_sims)
+
+plot_sim <- pred_sims_df |> 
+  pivot_longer("V1":"V1000", names_to = "sim", values_to = "est") |> 
+  #mutate(life_stage = ifelse(body_length_cm >= 120, "Adult", "Juvenile")) |> 
+  # summarise across length, or fix to a specific length?
+  summarise(est = sum(exp(est)), .by = c(sex, sim, quarter_f, sim)) |> 
+  #summarise(est = mean(est), .by = c(prey_group, sex, sim, quarter_f, life_stage)) |> 
+  pivot_wider(names_from = sex, values_from = est) |> 
+  mutate(diff = Female - Male)
+
+labs <- plot_sim |> 
+  mutate(pos = ifelse(diff > 0, "fem", "male")) |> 
+  summarise(n = n(), .by = c(quarter_f, pos)) |> 
+  pivot_wider(names_from = pos, values_from = n) |> 
+  mutate(prop = fem / (fem + male))
+
+plot_sim |> 
+  ggplot(aes(as.numeric(as.character(quarter_f)), diff)) +
+  geom_boxplot(aes(group = as.numeric(as.character(quarter_f))),
+               fill = NA, outlier.color = NA) +
+  geom_jitter(data = plot_sim |> 
+                #group_by(quarter_f) |>
+                sample_n(100*4, .by = quarter_f), 
+              alpha = 0.2, width = 0.2, height = 0) +
+  geom_hline(yintercept = 0, lty = 2) + 
+  #facet_wrap(~life_stage) +
+  geom_text(
+  data = labs,
+  aes(
+    as.numeric(as.character(quarter_f)),
+    Inf,
+    label = round(prop, digits = 3)
+  ),
+  vjust = 1.5,
+  inherit.aes = FALSE
+)
+
+
+# Now plot over size, by male and female
+pred_sims_df |> 
+  pivot_longer("V1":"V1000", names_to = "sim", values_to = "est") |> 
+  summarise(exp_est = median(exp(est)), .by = c(quarter_f, prey_group, sex, body_length_cm)) |> 
+  #mutate(exp_est = exp(est)) |> 
+  ggplot(aes(body_length_cm, exp_est, fill = prey_group)) +
+  geom_area() +
+  coord_cartesian(expand = 0) + 
+  facet_grid(sex ~ quarter_f) +
+  geom_vline(xintercept = 133) +
+  geom_hline(yintercept = 0.4) +
+  #facet_wrap( ~ sex) +
+  theme(legend.position = "bottom",
+        legend.title = element_blank())
+
+pred_sims_df |> 
+  pivot_longer("V1":"V1000", names_to = "sim", values_to = "est") |> 
+  summarise(est = mean(est), .by = c(sex, body_length_cm, quarter_f)) |> 
+  mutate(exp_est = exp(est)) |> 
+  ggplot(aes(body_length_cm, exp_est)) +
+  geom_area() +
+  coord_cartesian(expand = 0) + 
+  #facet_grid(sex ~ quarter_f) +
+  facet_grid(quarter_f ~ sex) +
+  theme(legend.position = "bottom",
+        legend.title = element_blank())
 ```
 
 ## Hybrid biomass predictions per sample
@@ -718,7 +823,7 @@ nd_bio_sex <- expand_grid(
     Y = median(diet_model_hybrid$Y, na.rm = TRUE)
   )
 
-p_bio_sex <- predict(h6, newdata = nd_bio_sex, re_form = NA, re_form_iid = NA)
+p_bio_sex <- predict(h9, newdata = nd_bio_sex, re_form = NA, re_form_iid = NA)
 
 bio_sex <- nd_bio_sex |>
   bind_cols(as_tibble(p_bio_sex) |> select(est)) |>
@@ -767,7 +872,7 @@ nd_bio_length <- expand_grid(
     Y = median(diet_model_hybrid$Y, na.rm = TRUE)
   )
 
-p_bio_length <- predict(h6, newdata = nd_bio_length, re_form = NA, re_form_iid = NA)
+p_bio_length <- predict(h9, newdata = nd_bio_length, re_form = NA, re_form_iid = NA)
 
 bio_length <- nd_bio_length |>
   bind_cols(as_tibble(p_bio_length) |> select(est)) |>
@@ -800,7 +905,7 @@ nd_bio_quarter <- expand_grid(
     Y = median(diet_model_hybrid$Y, na.rm = TRUE)
   )
 
-p_bio_quarter <- predict(h10, newdata = nd_bio_quarter, re_form = NA, re_form_iid = NA)
+p_bio_quarter <- predict(h9, newdata = nd_bio_quarter, re_form = NA, re_form_iid = NA)
 
 bio_quarter <- nd_bio_quarter |>
   bind_cols(as_tibble(p_bio_quarter) |> select(est)) |>
@@ -847,7 +952,7 @@ nd_cod_whiting_time <- expand_grid(
     Y = median(diet_model_hybrid$Y, na.rm = TRUE)
   )
 
-p_cod_whiting_time <- predict(h6, newdata = nd_cod_whiting_time, re_form = NA, re_form_iid = NA)
+p_cod_whiting_time <- predict(h9, newdata = nd_cod_whiting_time, re_form = NA, re_form_iid = NA)
 
 cod_whiting_time <- nd_cod_whiting_time |>
   bind_cols(as_tibble(p_cod_whiting_time) |> select(est)) |>
@@ -882,7 +987,7 @@ pg_bio_space <- pred_grid_base |>
     year_ct = year - year_center
   )
 
-p_bio_space <- predict(h8, newdata = pg_bio_space)
+p_bio_space <- predict(h9, newdata = pg_bio_space)
 
 bio_space <- pg_bio_space |>
   bind_cols(as_tibble(p_bio_space) |> select(est)) |>
@@ -893,7 +998,7 @@ plot_bio_space_gadus <- bio_space |>
   ggplot(aes(X * 1000, Y * 1000, fill = biomass)) +
   geom_raster() +
   geom_sf(data = land, fill = "grey90", linewidth = 0.2, inherit.aes = FALSE) +
-  viridis::scale_fill_viridis() +
+  viridis::scale_fill_viridis(trans = "fourth_root_power") +
   coord_sf(
     crs = 32632,
     xlim = range(bio_space$X * 1000),
@@ -910,6 +1015,32 @@ plot_bio_space_gadus <- bio_space |>
   theme(axis.text.x = element_text(angle = 90)) +
   facet_grid(sex ~ year)
 
+# SVC field
+plot_svc <- p_bio_space |>
+  filter(year == min(year)) |> 
+  pivot_longer(starts_with("zeta"), names_to = "prey", values_to = "zeta") |> 
+  mutate(prey = str_remove(prey, "zeta_s_prey_group")) |> 
+  ggplot(aes(X * 1000, Y * 1000, fill = zeta)) +
+  geom_raster() +
+  geom_sf(data = land, fill = "grey90", linewidth = 0.2, inherit.aes = FALSE) +
+  #viridis::scale_fill_viridis(trans = "fourth_root_power") +
+  scale_fill_gradient2() + 
+  coord_sf(
+    crs = 32632,
+    xlim = range(bio_space$X * 1000),
+    ylim = range(bio_space$Y * 1000),
+    expand = FALSE
+  ) +
+  labs(
+    title = "Predicted Gadus morhua biomass per sample in space",
+    #subtitle = paste("Predictions from h8 | Length fixed at", round(pred_length_hybrid, 1), "cm"),
+    x = "Longitude",
+    y = "Latitude",
+    fill = "SVC"
+  ) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  facet_wrap(~ prey, ncol = 5)
+
 plot_bio_sex_stack
 plot_bio_gadus_sex
 plot_bio_length_gadus
@@ -917,4 +1048,5 @@ plot_bio_quarter_stack
 plot_bio_quarter_gadus
 plot_cod_whiting_time
 plot_bio_space_gadus
+plot_svc
 ```

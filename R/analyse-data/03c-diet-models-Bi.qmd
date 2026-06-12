@@ -1,0 +1,992 @@
+---
+title: "Harbour Seal Diet Proportion Models"
+author: "Max Lindmark & Monica Mion"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format:
+  html:
+    toc: true
+    page-layout: full
+    embed-resources: true
+editor: source
+execute:
+  echo: true
+  eval: true
+  warning: false
+  message: false
+  cache: false
+---
+
+## Purpose
+
+This notebook follows the `sdmTMB` zero-one-inflated beta vignette: https://sdmtmb.github.io/sdmTMB/articles/zoib.html
+
+Here the response is **diet proportion within an individual seal**.
+
+The workflow is:
+
+-   keep the same filtered sample base as the earlier diet scripts,
+-   use `prey_species_lat` as the taxonomic label throughout,
+-   first inspect all taxa and their relative biomass contribution,
+-   keep taxa with relative biomass above 5%,
+-   aggregate the remaining low-contribution taxa into `Other`,
+-   fit the three ZOIB sub-models separately,
+-   compare simple and slightly more complex sub-models with AIC.
+
+```{r setup}
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(forcats)
+library(janitor)
+library(sf)
+library(sdmTMB)
+library(ggsidekick)
+library(rnaturalearth)
+
+theme_set(theme_sleek())
+
+home <- here::here()
+
+biomass_file <- file.path(home, "Data", "HS_SKAG_estimated_abundance_biomass_130426.csv")
+
+# These settings keep the same sample base as the other diet scripts.
+colony_keep <- c("Koster", "Väderöarna", "Lysekil", "Marstrand", "Onsala")
+method_keep <- c("Faeces", "Hunt")
+analysis_year_min <- 2013L
+
+# Keep taxa with relative biomass above this threshold.
+# Everything else is grouped into Other.
+relative_biomass_threshold <- 0.05
+
+# Focus the spatial maps on cod and herring.
+map_taxa <- c("Gadus morhua", "Clupea harengus")
+
+# Match the finer mesh and prediction grid idea used in 03b.
+mesh_cutoff_km <- 0.5
+map_cell_width_km <- 0.5
+```
+
+## Read and clean the raw data
+
+This section reads the file once and cleans the key columns we need later.
+
+```{r read-data}
+# Read the biomass file and clean the main columns used in the analysis.
+diet_raw <- read_csv(biomass_file, show_col_types = FALSE) |>
+  clean_names() |>
+  mutate(
+    year = suppressWarnings(as.integer(year)),
+    month = suppressWarnings(as.integer(month)),
+    quarter = suppressWarnings(as.integer(quarter)),
+    latitude = suppressWarnings(as.numeric(latitude)),
+    longitude = suppressWarnings(as.numeric(longitude)),
+
+    # Standardize colony names so the same colony is not split across spellings.
+    colony = case_when(
+      grepl("der.*arna", colony, ignore.case = TRUE) ~ "Väderöarna",
+      grepl("^Hallands.*der", colony, ignore.case = TRUE) ~ "Hallands Väderö",
+      TRUE ~ as.character(colony)
+    ),
+
+    # Standardize sampling type and taxon labels.
+    collection_method = as.character(collection_method),
+    collection_method = if_else(is.na(collection_method) | collection_method == "", "Unknown", collection_method),
+    prey_species_lat = if_else(
+      is.na(prey_species_lat) | prey_species_lat == "",
+      "Unknown",
+      as.character(prey_species_lat)
+    ),
+
+    # Fill quarter from month when quarter is missing.
+    quarter = coalesce(quarter, ((month - 1L) %/% 3L) + 1L)
+  )
+
+# Keep one row per sample for the metadata table.
+# This is the table used to decide which samples are part of the analysis.
+sample_meta_all <- diet_raw |>
+  filter(!is.na(sample_id), !is.na(year), !is.na(latitude), !is.na(longitude)) |>
+  distinct(sample_id, .keep_all = TRUE) |>
+  transmute(
+    sample_id,
+    year,
+    month,
+    quarter,
+    lat = latitude,
+    lon = longitude,
+    collection_method,
+    colony
+  )
+
+# Aggregate raw prey rows to sample x taxon.
+# At this point the taxon is always prey_species_lat.
+diet_rows_all <- diet_raw |>
+  filter(
+    !is.na(sample_id),
+    !is.na(biomass_not_corrected),
+    !is.na(prey_species_lat),
+    prey_species_lat != "",
+    tolower(prey_species_lat) != "non prey item",
+    prey_species_lat != "Unknown"
+  ) |>
+  transmute(
+    sample_id,
+    taxon = prey_species_lat,
+    biomass_kg = biomass_not_corrected / 1000
+  ) |>
+  summarise(biomass_kg = sum(biomass_kg, na.rm = TRUE), .by = c(sample_id, taxon))
+
+# Calculate total biomass per seal/sample.
+sample_totals_all <- diet_rows_all |>
+  summarise(sum_biomass_kg = sum(biomass_kg, na.rm = TRUE), .by = sample_id)
+
+# Keep only the samples used in the main analysis.
+sample_meta_filtered <- sample_meta_all |>
+  left_join(sample_totals_all, by = "sample_id") |>
+  mutate(sum_biomass_kg = coalesce(sum_biomass_kg, 0)) |>
+  filter(
+    collection_method %in% method_keep,
+    colony %in% colony_keep,
+    sum_biomass_kg > 0
+  )
+
+if (nrow(sample_meta_filtered) == 0) {
+  stop("No samples remain after filtering by colony, method, and positive total biomass.")
+}
+
+# Restrict to the main analysis period.
+analysis_year_max <- max(sample_meta_filtered$year, na.rm = TRUE)
+
+sample_meta_main <- sample_meta_filtered |>
+  filter(year >= analysis_year_min, year <= analysis_year_max)
+
+# Keep only prey rows from those retained samples.
+diet_rows_main <- diet_rows_all |>
+  semi_join(sample_meta_main, by = "sample_id")
+
+# A quick summary of the retained sample base.
+sample_meta_main |>
+  summarise(
+    n_samples = n_distinct(sample_id),
+    min_year = min(year),
+    max_year = max(year),
+    n_faeces = sum(collection_method == "Faeces"),
+    n_hunt = sum(collection_method == "Hunt")
+  )
+```
+
+## Inspect all taxa before aggregation
+
+This section answers: which `prey_species_lat` labels contribute most of the biomass?
+
+```{r taxon-support}
+# Sum biomass over all retained samples for each taxon.
+taxon_support_all <- diet_rows_main |>
+  summarise(
+    total_biomass_kg = sum(biomass_kg, na.rm = TRUE),
+    n_samples_present = n_distinct(sample_id),
+    .by = taxon
+  ) |>
+  arrange(desc(total_biomass_kg)) |>
+  mutate(
+    relative_biomass = total_biomass_kg / sum(total_biomass_kg),
+    cumulative_biomass = cumsum(relative_biomass)
+  )
+
+# Keep only taxa that contribute more than 5% of the total biomass.
+taxon_keep <- taxon_support_all |>
+  filter(relative_biomass > relative_biomass_threshold) |>
+  pull(taxon)
+
+taxon_support_all
+```
+
+```{r taxon-support-plots}
+# Plot all prey_species_lat labels before aggregation.
+# This makes it easier to see the long tail of low-biomass taxa.
+plot_taxon_relative_biomass <- taxon_support_all |>
+  mutate(taxon = fct_reorder(taxon, relative_biomass)) |>
+  ggplot(aes(relative_biomass, taxon)) +
+  geom_col(fill = "steelblue") +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Relative biomass by prey_species_lat before aggregation",
+    subtitle = paste(
+      "Taxa with relative biomass above",
+      scales::percent(relative_biomass_threshold),
+      "are kept; the rest are grouped into Other"
+    ),
+    x = "Relative biomass contribution",
+    y = NULL
+  )
+
+plot_taxon_cumulative_biomass <- taxon_support_all |>
+  mutate(rank = row_number()) |>
+  ggplot(aes(rank, cumulative_biomass)) +
+  geom_line(linewidth = 0.8, colour = "firebrick") +
+  geom_hline(
+    yintercept = taxon_support_all |>
+      filter(relative_biomass > relative_biomass_threshold) |>
+      summarise(value = sum(relative_biomass)) |>
+      pull(value),
+    linetype = 2,
+    colour = "grey40"
+  ) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Cumulative biomass contribution across prey_species_lat",
+    subtitle = paste(
+      "Dashed line shows the cumulative biomass covered by taxa above",
+      scales::percent(relative_biomass_threshold)
+    ),
+    x = "Taxa ranked by biomass contribution",
+    y = "Cumulative biomass"
+  )
+
+plot_taxon_relative_biomass
+plot_taxon_cumulative_biomass
+```
+
+## Group low-contribution taxa into Other
+
+This section keeps the dominant taxa and collapses the rest into `Other`.
+
+```{r build-model-table}
+# Replace low-contribution taxa with Other.
+diet_rows_grouped <- diet_rows_main |>
+  mutate(taxon = if_else(taxon %in% taxon_keep, taxon, "Other")) |>
+  summarise(biomass_kg = sum(biomass_kg, na.rm = TRUE), .by = c(sample_id, taxon))
+
+# Recalculate support after aggregation.
+taxon_support_grouped <- diet_rows_grouped |>
+  summarise(
+    total_biomass_kg = sum(biomass_kg, na.rm = TRUE),
+    n_samples_present = n_distinct(sample_id),
+    .by = taxon
+  ) |>
+  arrange(desc(total_biomass_kg)) |>
+  mutate(relative_biomass = total_biomass_kg / sum(total_biomass_kg))
+
+taxon_levels <- c(setdiff(taxon_support_grouped$taxon, "Other"), "Other")
+
+# Expand to every sample x taxon combination so that absences become explicit zeros.
+year_center <- mean(sample_meta_main$year, na.rm = TRUE)
+utm_zone <- floor((median(sample_meta_main$lon, na.rm = TRUE) + 180) / 6) + 1
+utm_crs <- paste0("+proj=utm +zone=", utm_zone, " +datum=WGS84 +units=m")
+
+diet_model <- sample_meta_main |>
+  select(sample_id, year, month, quarter, lat, lon, collection_method, colony, sum_biomass_kg) |>
+  expand_grid(taxon = taxon_levels) |>
+  left_join(diet_rows_grouped, by = c("sample_id", "taxon")) |>
+  mutate(
+    biomass_kg = coalesce(biomass_kg, 0),
+
+    # This is the within-seal diet proportion.
+    prop = if_else(sum_biomass_kg > 0, biomass_kg / sum_biomass_kg, 0),
+
+    # ZOIB step 1 from the vignette:
+    # y_zero is 1 when the taxon proportion is exactly zero.
+    y_zero = if_else(prop == 0, 1, 0),
+
+    # ZOIB step 2 from the vignette:
+    # y_one is only defined for non-zero observations.
+    y_one = ifelse(prop == 1, 1, ifelse(prop < 1 & prop != 0, 0, NA)),
+
+    # ZOIB step 3 from the vignette:
+    # y_proportion keeps only the values strictly between 0 and 1.
+    y_proportion = ifelse(prop < 1 & prop > 0, prop, NA),
+
+    year_ct = year - year_center,
+    collection_method = factor(collection_method, levels = method_keep),
+    taxon = factor(taxon, levels = taxon_levels),
+    year_f = factor(year)
+  ) |>
+  add_utm_columns(ll_names = c("lon", "lat"))
+
+# Check how much of the response is zero, one, or strictly between 0 and 1.
+diet_model |>
+  summarise(
+    n_samples = n_distinct(sample_id),
+    n_rows = n(),
+    n_taxa = n_distinct(taxon),
+    prop_zero = mean(prop == 0),
+    prop_one = mean(prop == 1),
+    prop_middle = mean(prop > 0 & prop < 1)
+  )
+```
+
+## Support diagnostics after aggregation
+
+This section shows the taxa that are actually entering the proportion model.
+
+```{r support-plots-after-grouping}
+taxon_component_support <- diet_model |>
+  summarise(
+    total_prop = sum(prop, na.rm = TRUE),
+    n_zero = sum(prop == 0),
+    n_one = sum(prop == 1),
+    n_middle = sum(prop > 0 & prop < 1),
+    .by = taxon
+  )
+
+plot_taxon_support_grouped <- taxon_support_grouped |>
+  mutate(taxon = fct_reorder(as.character(taxon), total_biomass_kg)) |>
+  ggplot(aes(total_biomass_kg, taxon)) +
+  geom_col(fill = "darkolivegreen3") +
+  labs(
+    title = "Taxa retained for the ZOIB proportion model",
+    subtitle = "Dominant prey_species_lat labels are kept; the rest are grouped into Other",
+    x = "Total biomass (kg)",
+    y = NULL
+  )
+
+plot_boundary_mass <- taxon_component_support |>
+  transmute(
+    taxon,
+    zero_rate = n_zero / (n_zero + n_one + n_middle),
+    one_rate = n_one / (n_zero + n_one + n_middle),
+    middle_rate = n_middle / (n_zero + n_one + n_middle)
+  ) |>
+  pivot_longer(cols = c(zero_rate, one_rate,middle_rate), names_to = "component", values_to = "rate") |>
+  ggplot(aes(rate, fct_reorder(as.character(taxon), rate), fill = component)) +
+  geom_col(position = "dodge") +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Zero, one and middle mass by retained taxon",
+    x = "Rate",
+    y = NULL,
+    fill = NULL
+  )
+
+plot_taxon_support_grouped
+plot_boundary_mass
+```
+
+## Quick north-south check in the observed data
+
+This is a simple empirical check before model-based maps.
+It asks whether some taxa are more common in the north or south part of the study area.
+
+```{r north-south-check}
+# Split the study area into a simple north and south half using the median latitude.
+lat_split <- median(sample_meta_main$lat, na.rm = TRUE)
+
+north_south_summary <- diet_model |>
+  filter(as.character(taxon) != "Other") |>
+  mutate(region = if_else(lat >= lat_split, "north", "south")) |>
+  summarise(
+    mean_prop = mean(prop, na.rm = TRUE),
+    prevalence = mean(prop > 0, na.rm = TRUE),
+    .by = c(taxon, region)
+  )
+
+plot_north_south <- north_south_summary |>
+  ggplot(aes(mean_prop, fct_reorder(as.character(taxon), mean_prop), fill = region)) +
+  geom_col(position = "dodge") +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Observed mean diet proportion in the north and south",
+    subtitle = "This is a simple descriptive split at the median latitude",
+    x = "Mean proportion",
+    y = NULL,
+    fill = NULL
+  )
+
+north_south_summary
+plot_north_south
+```
+
+## Fit the three ZOIB sub-models
+
+Following the sdmTMB ZOIB vignette, we fit three separate sub-models: a zero model (probability of absence), a one model (probability of full dominance), and a beta model (proportion when strictly between 0 and 1). We start simple and increase complexity step by step. The proportion sub-model mirrors the complexity range of the Tweedie model in 03b.
+
+```{r fit-models}
+# Split the data into the three parts needed by the vignette.
+zero_data       <- diet_model
+one_data        <- diet_model |> filter(!is.na(y_one))
+proportion_data <- diet_model |> filter(!is.na(y_proportion))
+
+# Mesh for the spatial proportion model (p5 only).
+mesh <- make_mesh(proportion_data, xy_cols = c("X", "Y"), type = "cutoff", cutoff = mesh_cutoff_km)
+
+# -----------------------------
+# Zero component
+# -----------------------------
+# y_zero = 1 when taxon is absent, 0 when present.
+# Minimum predictor: taxon. Build up by adding collection method, then their interaction.
+
+z1 <- sdmTMB(
+  y_zero ~ 0 + taxon,
+  data    = zero_data,
+  family  = binomial(link = "logit"),
+  spatial = "off"
+)
+
+z2 <- sdmTMB(
+  y_zero ~ 0 + taxon + collection_method,
+  data    = zero_data,
+  family  = binomial(link = "logit"),
+  spatial = "off"
+)
+
+z3 <- sdmTMB(
+  y_zero ~ 0 + taxon * collection_method,
+  data    = zero_data,
+  family  = binomial(link = "logit"),
+  spatial = "off"
+)
+
+# -----------------------------
+# One component
+# -----------------------------
+# y_one = 1 when taxon takes the entire sample, 0 when present but not exclusive.
+# Exact ones are rare; keep this component simple: taxon baseline, then add method.
+
+o1 <- sdmTMB(
+  y_one ~ 0 + taxon,
+  data    = one_data,
+  family  = binomial(link = "logit"),
+  spatial = "off"
+)
+
+o2 <- sdmTMB(
+  y_one ~ 0 + taxon + collection_method,
+  data    = one_data,
+  family  = binomial(link = "logit"),
+  spatial = "off"
+)
+
+# -----------------------------
+# Proportion component
+# -----------------------------
+# Beta model for y_proportion values strictly between 0 and 1.
+# Ladder spans from a simple non-spatial formula up to the Tweedie 03b complexity
+# (collection_method * taxon + year_f * taxon + spatial field).
+
+p1 <- sdmTMB(
+  y_proportion ~ 0 + taxon,
+  data    = proportion_data,
+  family  = Beta(link = "logit"),
+  spatial = "off"
+)
+
+p2 <- sdmTMB(
+  y_proportion ~ 0 + taxon + collection_method,
+  data    = proportion_data,
+  family  = Beta(link = "logit"),
+  spatial = "off"
+)
+
+p3 <- sdmTMB(
+  y_proportion ~ 0 + taxon * collection_method,
+  data    = proportion_data,
+  family  = Beta(link = "logit"),
+  spatial = "off"
+)
+
+# Add a year smooth per taxon — mirrors the temporal structure of the Tweedie 03b models.
+# Using a continuous smooth rather than factor year avoids singularity with sparse taxon/year cells.
+p4 <- sdmTMB(
+  y_proportion ~ 0 + taxon + collection_method + s(year_ct, by = taxon),
+  data    = proportion_data,
+  family  = Beta(link = "logit"),
+  spatial = "off"
+)
+
+# Same as p4 but adds a spatial random field —
+most complex candidate.
+
+p5 <- sdmTMB(
+  y_proportion ~ 0 + taxon + collection_method + s(year_ct, by = taxon),
+  data    = proportion_data,
+  family  = Beta(link = "logit"),
+  mesh    = mesh,
+  spatial = "on"
+)
+```
+
+## AIC comparison of the sub-models
+
+A quick AIC screening within each component. The three components are independent so we compare them separately, then combine the best from each.
+
+```{r aic-tables}
+# Zero component AIC table.
+zero_aic <- tibble(
+  component = "zero",
+  model     = c("z1_taxon", "z2_taxon_method", "z3_taxon_x_method"),
+  aic       = c(AIC(z1), AIC(z2), AIC(z3))
+) |>
+  arrange(aic)
+
+# One component AIC table.
+one_aic <- tibble(
+  component = "one",
+  model     = c("o1_taxon", "o2_taxon_method"),
+  aic       = c(AIC(o1), AIC(o2))
+) |>
+  arrange(aic)
+
+# Proportion component AIC table.
+proportion_aic <- tibble(
+  component = "proportion",
+  model     = c(
+    "p1_taxon",
+    "p2_taxon_method",
+    "p3_taxon_x_method",
+    "p4_taxon_method_year_smooth",
+    "p5_taxon_method_year_smooth_spatial"
+  ),
+  aic = c(AIC(p1), AIC(p2), AIC(p3), AIC(p4), AIC(p5))
+) |>
+  arrange(aic)
+
+zero_aic
+one_aic
+proportion_aic
+```
+
+## Combine predictions from the best sub-models
+
+This section combines the three fitted parts exactly as in the vignette.
+
+```{r predictions}
+# Identify the best model name in each sub-model table.
+best_zero_name       <- zero_aic       |> slice_head(n = 1) |> pull(model)
+best_one_name        <- one_aic        |> slice_head(n = 1) |> pull(model)
+best_proportion_name <- proportion_aic |> slice_head(n = 1) |> pull(model)
+
+# Pull out the corresponding fitted object.
+best_zero <- switch(best_zero_name,
+  z1_taxon         = z1,
+  z2_taxon_method  = z2,
+  z3_taxon_x_method = z3
+)
+
+best_one <- switch(best_one_name,
+  o1_taxon        = o1,
+  o2_taxon_method = o2
+)
+
+best_proportion <- switch(best_proportion_name,
+  p1_taxon                              = p1,
+  p2_taxon_method                       = p2,
+  p3_taxon_x_method                     = p3,
+  p4_taxon_method_year_smooth           = p4,
+  p5_taxon_method_year_smooth_spatial   = p5
+)
+
+# Build a simple prediction grid over year, taxon, and sampling method.
+# These predictions use one representative location, so they show temporal and method effects
+# but they do not show spatial gradients.
+pred_grid <- expand_grid(
+  year = sort(unique(diet_model$year)),
+  taxon = factor(taxon_levels, levels = levels(diet_model$taxon)),
+  collection_method = factor(method_keep, levels = levels(diet_model$collection_method))
+) |>
+  mutate(
+    year_ct = year - year_center,
+    year_f = factor(year, levels = levels(diet_model$year_f)),
+
+    # Give the spatial model one representative location when needed.
+    X = median(diet_model$X, na.rm = TRUE),
+    Y = median(diet_model$Y, na.rm = TRUE)
+  )
+
+# Predict each part of the ZOIB on the response scale.
+pred_grid$p0 <- plogis(as.numeric(predict(best_zero,       newdata = pred_grid, re_form = NA)$est))
+pred_grid$p1 <- plogis(as.numeric(predict(best_one,        newdata = pred_grid, re_form = NA)$est))
+pred_grid$mu <- plogis(as.numeric(predict(best_proportion, newdata = pred_grid, re_form = NA)$est))
+
+# Combine the three parts exactly as in the vignette.
+pred_grid <- pred_grid |>
+  mutate(expected_prop = (1 - p0) * (p1 + (1 - p1) * mu))
+
+plot_expected_prop <- pred_grid |>
+  ggplot(aes(year, expected_prop, colour = collection_method)) +
+  geom_line(linewidth = 0.8) +
+  facet_wrap(~ taxon, scales = "free_y") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Expected diet proportion by retained taxon and sampling type",
+    subtitle = paste(
+      "Best sub-models:",
+      best_zero_name,
+      "/",
+      best_one_name,
+      "/",
+      best_proportion_name
+    ),
+    x = "Year",
+    y = "Expected proportion",
+    colour = "Method"
+  )
+
+pred_grid
+plot_expected_prop
+```
+
+## Part 2: Predict diet proportions in space and time
+
+We focus on cod (*Gadus morhua*) and herring (*Clupea harengus*), the two taxa with enough spatial coverage to support map predictions. For each species we fit three separate ZOIB sub-models (zero, one, proportion), then combine them using the same formula as Part 1.
+
+The approach has two steps:
+
+1. **Temporal trends** — predict over years at a representative location, using the best non-spatial sub-model structure from Part 1.
+2. **Spatial predictions** — re-fit the proportion sub-model with a spatial field (and optionally a spatiotemporal field) to show where in the study area each species dominates the diet.
+
+---
+
+## Prediction grid
+
+```{r map-grid}
+# Convex-hull grid over the observation area, covering all years.
+# X and Y are in km (sdmTMB default); we convert to metres only at the plotting stage.
+d <- diet_model
+
+hull_idx  <- chull(d$X, d$Y)
+hull_coords <- cbind(d$X[hull_idx], d$Y[hull_idx])
+hull_coords <- rbind(hull_coords, hull_coords[1, ])
+
+sp_poly <- sp::SpatialPolygons(
+  list(sp::Polygons(list(sp::Polygon(hull_coords)), ID = 1))
+)
+sp_poly_df <- sp::SpatialPolygonsDataFrame(sp_poly, data = data.frame(ID = 1))
+
+grid_base <- expand.grid(
+  X    = seq(min(d$X), max(d$X), map_cell_width_km),
+  Y    = seq(min(d$Y), max(d$Y), map_cell_width_km),
+  year = sort(unique(d$year))
+)
+
+sp::coordinates(grid_base) <- c("X", "Y")
+inside   <- !is.na(sp::over(grid_base, as(sp_poly_df, "SpatialPolygons")))
+grid_base <- grid_base[inside, ]
+
+pred_grid <- as.data.frame(grid_base) |>
+  mutate(
+    collection_method = factor("Hunt", levels = levels(diet_model$collection_method)),
+    year_ct = year - year_center,
+    year_f  = factor(year, levels = levels(diet_model$year_f))
+  )
+
+# Coastline for maps (same CRS as the data: UTM 32N).
+land <- ne_countries(scale = "large", returnclass = "sf") |>
+  st_transform(32632)
+```
+
+## Species-specific ZOIB models
+
+For each species we fit:
+
+- A **zero** sub-model: probability the species is absent from the sample.
+- A **one** sub-model: probability the species dominates the entire sample.
+- A **proportion** sub-model with a spatial field for map prediction.
+- A **proportion** sub-model with a spatiotemporal (IID) field for year-by-year maps.
+
+The fixed-effects structure follows the best model identified in Part 1.
+
+```{r species-models}
+# --- Cod ---
+
+cod_zero_data <- zero_data       |> filter(as.character(taxon) == "Gadus morhua")
+cod_one_data  <- one_data        |> filter(as.character(taxon) == "Gadus morhua")
+cod_prop_data <- proportion_data |> filter(as.character(taxon) == "Gadus morhua")
+
+cod_mesh <- make_mesh(cod_prop_data, xy_cols = c("X", "Y"), type = "cutoff", cutoff = mesh_cutoff_km)
+
+cod_zero_mod <- sdmTMB(
+  y_zero ~ collection_method,
+  data    = cod_zero_data,
+  family  = binomial(link = "logit"),
+  spatial = "off"
+)
+
+cod_one_mod <- sdmTMB(
+  y_one ~ collection_method,
+  data    = cod_one_data,
+  family  = binomial(link = "logit"),
+  spatial = "off"
+)
+
+# Spatial-only proportion model: time-averaged spatial pattern.
+cod_prop_spatial <- sdmTMB(
+  y_proportion ~ collection_method,
+  data    = cod_prop_data,
+  family  = Beta(link = "logit"),
+  mesh    = cod_mesh,
+  spatial = "on"
+)
+
+# Spatiotemporal proportion model: spatial pattern allowed to vary by year.
+cod_prop_st <- sdmTMB(
+  y_proportion ~ collection_method,
+  data           = cod_prop_data,
+  family         = Beta(link = "logit"),
+  mesh           = cod_mesh,
+  spatial        = "on",
+  time           = "year",
+  spatiotemporal = "iid"
+)
+
+cod_years <- sort(unique(cod_prop_data$year))
+
+# --- Herring ---
+
+her_zero_data <- zero_data       |> filter(as.character(taxon) == "Clupea harengus")
+her_one_data  <- one_data        |> filter(as.character(taxon) == "Clupea harengus")
+her_prop_data <- proportion_data |> filter(as.character(taxon) == "Clupea harengus")
+
+her_mesh <- make_mesh(her_prop_data, xy_cols = c("X", "Y"), type = "cutoff", cutoff = mesh_cutoff_km)
+
+her_zero_mod <- sdmTMB(
+  y_zero ~ collection_method,
+  data    = her_zero_data,
+  family  = binomial(link = "logit"),
+  spatial = "off"
+)
+
+her_one_mod <- sdmTMB(
+  y_one ~ collection_method,
+  data    = her_one_data,
+  family  = binomial(link = "logit"),
+  spatial = "off"
+)
+
+her_prop_spatial <- sdmTMB(
+  y_proportion ~ collection_method,
+  data    = her_prop_data,
+  family  = Beta(link = "logit"),
+  mesh    = her_mesh,
+  spatial = "on"
+)
+
+her_prop_st <- sdmTMB(
+  y_proportion ~ collection_method,
+  data           = her_prop_data,
+  family         = Beta(link = "logit"),
+  mesh           = her_mesh,
+  spatial        = "on",
+  time           = "year",
+  spatiotemporal = "iid"
+)
+
+her_years <- sort(unique(her_prop_data$year))
+```
+
+## Temporal trends (non-spatial)
+
+Predict over all years at the median location using the non-spatial sub-models. This shows the temporal trend in expected diet proportion for each sampling method.
+
+```{r temporal-trends}
+# One row per year × method combination; fixed spatial location.
+trend_grid <- expand_grid(
+  year              = sort(unique(diet_model$year)),
+  collection_method = factor(method_keep, levels = levels(diet_model$collection_method))
+) |>
+  mutate(
+    year_ct = year - year_center,
+    year_f  = factor(year, levels = levels(diet_model$year_f)),
+    X       = median(diet_model$X, na.rm = TRUE),
+    Y       = median(diet_model$Y, na.rm = TRUE)
+  )
+
+# Cod
+trend_cod <- trend_grid |>
+  mutate(
+    p0            = plogis(predict(cod_zero_mod, newdata = trend_grid, re_form = NA)$est),
+    p1            = plogis(predict(cod_one_mod,  newdata = trend_grid, re_form = NA)$est),
+    mu            = plogis(predict(cod_prop_spatial, newdata = trend_grid, re_form = NA)$est),
+    expected_prop = (1 - p0) * (p1 + (1 - p1) * mu),
+    taxon         = "Gadus morhua"
+  )
+
+# Herring
+trend_her <- trend_grid |>
+  mutate(
+    p0            = plogis(predict(her_zero_mod, newdata = trend_grid, re_form = NA)$est),
+    p1            = plogis(predict(her_one_mod,  newdata = trend_grid, re_form = NA)$est),
+    mu            = plogis(predict(her_prop_spatial, newdata = trend_grid, re_form = NA)$est),
+    expected_prop = (1 - p0) * (p1 + (1 - p1) * mu),
+    taxon         = "Clupea harengus"
+  )
+
+trend_both <- bind_rows(trend_cod, trend_her)
+
+trend_both |>
+  ggplot(aes(year, expected_prop, colour = collection_method)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.5) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, NA)) +
+  scale_colour_brewer(palette = "Set1") +
+  facet_wrap(~taxon, scales = "free_y") +
+  labs(
+    title   = "Temporal trend in expected diet proportion",
+    x       = "Year",
+    y       = "Expected proportion",
+    colour  = "Sampling method"
+  )
+```
+
+## Time-averaged spatial map
+
+The spatial-only proportion model averages over time and shows the broad spatial structure in diet composition.
+
+```{r spatial-map}
+# Use a single representative year for the spatial-only prediction.
+map_year <- 2019
+
+pg_s <- pred_grid |> filter(year == map_year)
+
+cod_pg_s <- pg_s |>
+  mutate(
+    p0            = plogis(predict(cod_zero_mod,     newdata = pg_s)$est),
+    p1            = plogis(predict(cod_one_mod,      newdata = pg_s)$est),
+    mu            = plogis(predict(cod_prop_spatial, newdata = pg_s)$est),
+    expected_prop = (1 - p0) * (p1 + (1 - p1) * mu),
+    taxon         = "Gadus morhua"
+  )
+
+her_pg_s <- pg_s |>
+  mutate(
+    p0            = plogis(predict(her_zero_mod,     newdata = pg_s)$est),
+    p1            = plogis(predict(her_one_mod,      newdata = pg_s)$est),
+    mu            = plogis(predict(her_prop_spatial, newdata = pg_s)$est),
+    expected_prop = (1 - p0) * (p1 + (1 - p1) * mu),
+    taxon         = "Clupea harengus"
+  )
+
+pg_spatial <- bind_rows(cod_pg_s, her_pg_s)
+
+pg_spatial |>
+  ggplot(aes(X * 1000, Y * 1000, fill = expected_prop)) +
+  geom_raster() +
+  geom_sf(data = land, fill = "grey90", linewidth = 0.2, inherit.aes = FALSE) +
+  viridis::scale_fill_viridis(labels = scales::percent_format(accuracy = 1)) +
+  coord_sf(
+    crs  = 32632,
+    xlim = range(pg_spatial$X * 1000),
+    ylim = range(pg_spatial$Y * 1000),
+    expand = FALSE
+  ) +
+  facet_wrap(~taxon, ncol = 2) +
+  labs(
+    title    = paste0("Time-averaged spatial prediction (", map_year, ")"),
+    subtitle = "Spatial field averages over years; zero and one sub-models are non-spatial",
+    x        = NULL,
+    y        = NULL,
+    fill     = "Expected\nproportion"
+  ) +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+## Spatiotemporal maps
+
+The spatiotemporal model lets the spatial field vary by year (IID random fields). We predict for all observed years and show three representative snapshots.
+
+```{r spatiotemporal-map}
+# Predict over all observed years for each species.
+cod_pg_st <- pred_grid |>
+  filter(year %in% cod_years) |>
+  mutate(
+    p0            = plogis(predict(cod_zero_mod, newdata = filter(pred_grid, year %in% cod_years))$est),
+    p1            = plogis(predict(cod_one_mod,  newdata = filter(pred_grid, year %in% cod_years))$est),
+    mu            = plogis(predict(cod_prop_st,  newdata = filter(pred_grid, year %in% cod_years))$est),
+    expected_prop = (1 - p0) * (p1 + (1 - p1) * mu),
+    taxon         = "Gadus morhua"
+  )
+
+her_pg_st <- pred_grid |>
+  filter(year %in% her_years) |>
+  mutate(
+    p0            = plogis(predict(her_zero_mod, newdata = filter(pred_grid, year %in% her_years))$est),
+    p1            = plogis(predict(her_one_mod,  newdata = filter(pred_grid, year %in% her_years))$est),
+    mu            = plogis(predict(her_prop_st,  newdata = filter(pred_grid, year %in% her_years))$est),
+    expected_prop = (1 - p0) * (p1 + (1 - p1) * mu),
+    taxon         = "Clupea harengus"
+  )
+
+pg_st <- bind_rows(cod_pg_st, her_pg_st)
+
+# Three representative years: first, middle, last of the time series.
+snap_years <- c(min(cod_years), median(cod_years) |> round(), max(cod_years))
+
+pg_st |>
+  filter(year %in% snap_years) |>
+  ggplot(aes(X * 1000, Y * 1000, fill = expected_prop)) +
+  geom_raster() +
+  geom_sf(data = land, fill = "grey90", linewidth = 0.2, inherit.aes = FALSE) +
+  viridis::scale_fill_viridis(labels = scales::percent_format(accuracy = 1)) +
+  coord_sf(
+    crs  = 32632,
+    xlim = range(pg_st$X * 1000),
+    ylim = range(pg_st$Y * 1000),
+    expand = FALSE
+  ) +
+  facet_grid(taxon ~ year) +
+  labs(
+    title    = "Spatiotemporal prediction — three snapshot years",
+    subtitle = "IID spatiotemporal fields; p0 and p1 sub-models are non-spatial",
+    x        = NULL,
+    y        = NULL,
+    fill     = "Expected\nproportion"
+  ) +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+## ZOIB component breakdown
+
+Decompose the final prediction into its three parts to understand what drives the spatial pattern.
+
+```{r component-breakdown}
+# Use the time-averaged spatial prediction for the breakdown year.
+breakdown_grid <- pred_grid |> filter(year == map_year)
+
+component_long <- bind_rows(
+  breakdown_grid |>
+    mutate(
+      p0    = plogis(predict(cod_zero_mod,     newdata = breakdown_grid)$est),
+      p1    = plogis(predict(cod_one_mod,      newdata = breakdown_grid)$est),
+      mu    = plogis(predict(cod_prop_spatial, newdata = breakdown_grid)$est),
+      taxon = "Gadus morhua"
+    ),
+  breakdown_grid |>
+    mutate(
+      p0    = plogis(predict(her_zero_mod,     newdata = breakdown_grid)$est),
+      p1    = plogis(predict(her_one_mod,      newdata = breakdown_grid)$est),
+      mu    = plogis(predict(her_prop_spatial, newdata = breakdown_grid)$est),
+      taxon = "Clupea harengus"
+    )
+) |>
+  mutate(expected_prop = (1 - p0) * (p1 + (1 - p1) * mu)) |>
+  pivot_longer(
+    cols      = c(p0, mu, expected_prop),
+    names_to  = "component",
+    values_to = "value"
+  ) |>
+  mutate(component = recode(component,
+    p0            = "P(absence)",
+    mu            = "Positive proportion",
+    expected_prop = "Expected proportion"
+  ))
+
+component_long |>
+  ggplot(aes(X * 1000, Y * 1000, fill = value)) +
+  geom_raster() +
+  geom_sf(data = land, fill = "grey90", linewidth = 0.2, inherit.aes = FALSE) +
+  viridis::scale_fill_viridis(labels = scales::percent_format(accuracy = 1)) +
+  coord_sf(
+    crs  = 32632,
+    xlim = range(breakdown_grid$X * 1000),
+    ylim = range(breakdown_grid$Y * 1000),
+    expand = FALSE
+  ) +
+  facet_grid(taxon ~ component) +
+  labs(
+    title    = paste0("ZOIB component breakdown (", map_year, ")"),
+    subtitle = "Left: probability of absence. Centre: positive proportion. Right: combined expected proportion.",
+    x        = NULL,
+    y        = NULL,
+    fill     = "Value"
+  ) +
+  theme(axis.text.x = element_text(angle = 90))
+```

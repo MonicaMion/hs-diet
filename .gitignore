@@ -48,3 +48,14 @@ po/*~
 # RStudio Connect folder
 rsconnect/
 .DS_Store
+
+# Agent
+agent.md
+
+# R session info
+sessionInfo.R
+
+# README files
+README.md
+decision.md
+fixes.md
