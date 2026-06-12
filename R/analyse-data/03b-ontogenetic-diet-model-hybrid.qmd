@@ -531,8 +531,10 @@ prey_group_support
 ```{r fit-hybrid-models}
 mesh_hybrid <- make_mesh(diet_model_hybrid, xy_cols = c("X", "Y"), type = "cutoff", cutoff = mesh_cutoff_km)
 
+diet_model_hybrid$body_length_cm_sc <- (diet_model_hybrid$body_length_cm - mean(diet_model_hybrid$body_length_cm)) / sd(diet_model_hybrid$body_length_cm)
+
 h1 <- sdmTMB(
-  formula = biomass_kg ~ sex * prey_group + body_length_cm + (1 | year_f),
+  formula = biomass_kg ~ sex * prey_group + body_length_cm_sc + (1 | year_f),
   data = diet_model_hybrid,
   mesh = mesh_hybrid,
   family = tweedie(),
@@ -540,7 +542,7 @@ h1 <- sdmTMB(
 )
 
 h2 <- sdmTMB(
-  formula = biomass_kg ~ sex * prey_group + body_length_cm * prey_group + (1 | year_f),
+  formula = biomass_kg ~ sex * prey_group + body_length_cm_sc * prey_group + (1 | year_f),
   data = diet_model_hybrid,
   mesh = mesh_hybrid,
   family = tweedie(),
@@ -548,7 +550,7 @@ h2 <- sdmTMB(
 )
 
 h3 <- sdmTMB(
-  formula = biomass_kg ~ sex * prey_group + s(body_length_cm, by = prey_group) + (1 | year_f),
+  formula = biomass_kg ~ sex * prey_group + s(body_length_cm_sc, by = prey_group) + (1 | year_f),
   data = diet_model_hybrid,
   mesh = mesh_hybrid,
   family = tweedie(),
@@ -556,7 +558,7 @@ h3 <- sdmTMB(
 )
 
 h4 <- sdmTMB(
-  formula = biomass_kg ~ sex * prey_group + body_length_cm * sex + (1 | year_f),
+  formula = biomass_kg ~ sex * prey_group + body_length_cm_sc * sex + (1 | year_f),
   data = diet_model_hybrid,
   mesh = mesh_hybrid,
   family = tweedie(),
@@ -564,7 +566,7 @@ h4 <- sdmTMB(
 )
 
 h5 <- sdmTMB(
-  formula = biomass_kg ~ sex * prey_group + body_length_cm + (1 | year_f),
+  formula = biomass_kg ~ sex * prey_group + body_length_cm_sc + (1 | year_f),
   data = diet_model_hybrid,
   mesh = mesh_hybrid,
   family = tweedie(),
@@ -573,7 +575,7 @@ h5 <- sdmTMB(
 )
 
 h6 <- sdmTMB(
-  formula = biomass_kg ~ sex * prey_group + body_length_cm * prey_group + (1 | year_f),
+  formula = biomass_kg ~ sex * prey_group + body_length_cm_sc * prey_group + (1 | year_f),
   data = diet_model_hybrid,
   mesh = mesh_hybrid,
   family = tweedie(),
@@ -591,7 +593,7 @@ h7 <- sdmTMB(
 )
 
 h8 <- sdmTMB(
-  formula = biomass_kg ~ sex * prey_group + body_length_cm * prey_group + (1 | year_f),
+  formula = biomass_kg ~ sex * prey_group + body_length_cm_sc * prey_group + (1 | year_f),
   data = diet_model_hybrid,
   mesh = mesh_hybrid,
   family = tweedie(),
@@ -602,7 +604,7 @@ h8 <- sdmTMB(
 )
 
 h9 <- sdmTMB(
-  formula = biomass_kg ~ sex * prey_group + quarter_f * sex + body_length_cm * prey_group + (1 | year_f),
+  formula = biomass_kg ~ sex * prey_group + quarter_f * sex + body_length_cm_sc * prey_group + (1 | year_f),
   data = diet_model_hybrid,
   mesh = mesh_hybrid,
   family = tweedie(),
@@ -621,7 +623,7 @@ h10 <- sdmTMB(
 )
 
 h11 <- sdmTMB(
-  formula = biomass_kg ~ sex * prey_group + quarter_f * sex + body_length_cm * prey_group + body_length_cm * sex + (1 | year_f),
+  formula = biomass_kg ~ sex * prey_group + quarter_f * sex + body_length_cm_sc * prey_group + body_length_cm_sc * sex + (1 | year_f),
   data = diet_model_hybrid,
   mesh = mesh_hybrid,
   family = tweedie(),
@@ -632,6 +634,23 @@ h11 <- sdmTMB(
 AIC(h9, h11)
 AIC(h1, h2, h3, h4, h5, h6, h7, h8, h9, h10) |>
   arrange(AIC)
+
+# Maybe prey*quarter as well? Then we might just do a 3-way interaction, which may or may not be supported..
+```
+
+```{r}
+library(tidyverse)
+library(broom.mixed)  # or broom if h9 is not mixed
+
+# biomass_kg ~ sex * prey_group + quarter_f * sex + body_length_cm * prey_group + (1 | year_f)
+# tidy(h9) |> as.data.frame()
+# 
+# # female, q1?
+# ggeffects::ggpredict(h9, terms = c("quarter_f", "sex"))
+# 
+# ggeffects::ggpredict(h9, terms = c("quarter_f", "sex")) |>
+#   plot()
+
 ```
 
 ```{r hybrid-level-diagnostics}
@@ -690,12 +709,17 @@ hybrid_gad_quarter <- nd_hybrid_gad |>
 ggplot(hybrid_gad_quarter, aes(as.numeric(as.character(quarter_f)), biomass, color = sex)) +
   geom_line()
 
-plot(ggeffects::ggpredict(h11, c("prey_group", "sex", "quarter_f"))) +
+plot(ggeffects::ggpredict(h11, c("sex", "prey_group", "quarter_f"))) +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
-plot(ggeffects::ggpredict(h11, c("prey_group", "sex"))) +
+
+ggeffects::ggpredict(h11, c("sex"))
+ggeffects::ggpredict(h11, c("sex", "prey_group"))
+plot(ggeffects::ggpredict(h11, c("sex", "prey_group"))) +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
-plot(ggeffects::ggpredict(h9, c("body_length_cm", "prey_group")))
-plot(ggeffects::ggpredict(h9, c("body_length_cm", "prey_group", "sex")))
+
+plot(ggeffects::ggpredict(h9, c("body_length_cm_sc", "prey_group")))
+
+plot(ggeffects::ggpredict(h9, c("body_length_cm_sc", "prey_group", "sex")))
 
 diet_model_hybrid |>
   distinct(sample_id, body_length_cm, sex) |>
@@ -711,96 +735,160 @@ diet_model_hybrid |>
 ## Predict with sims to get uncertainty on prey, sex and quarter
 
 ```{r}
-nd_hybrid_long <- expand_grid(
+# formula = biomass_kg ~ sex * prey_group + quarter_f * sex + body_length_cm_sc * prey_group + body_length_cm_sc * sex + (1 | year_f)
+
+nd_sex <- expand_grid(
   quarter_f = factor(c(1:4), levels = levels(diet_model_hybrid$quarter_f)),
   prey_group = factor(prey_group_levels, levels = prey_group_levels),
-  body_length_cm = seq(
-    min(diet_model_hybrid$body_length_cm), 
-    max(diet_model_hybrid$body_length_cm),
+  body_length_cm_sc = seq(
+    min(diet_model_hybrid$body_length_cm_sc), 
+    max(diet_model_hybrid$body_length_cm_sc),
     length.out = 30),
   sex = unique(diet_model_hybrid$sex)
-) |>
-  mutate(
-    year = pred_year_hybrid,
-    year_ct = year - year_center,
-    year_f = factor(year, levels = levels(diet_model_hybrid$year_f)),
-    X = median(diet_model_hybrid$X, na.rm = TRUE),
-    Y = median(diet_model_hybrid$Y, na.rm = TRUE)
+)
+
+# predict without sims
+pred <- predict(
+  h9, newdata = nd_sex, 
+  re_form = NA, re_form_iid = NA
   )
 
+pred_sum <- pred |> 
+  summarise(sum_exp_est = sum(exp(est)), .by = c(quarter_f, body_length_cm_sc, sex))
+
+ggplot(pred_sum, aes(body_length_cm_sc, sum_exp_est, color = sex)) + 
+  geom_line() + 
+  facet_wrap(~quarter_f)
+
+# Now don't summarise and instead plot by prey group
+# Predict without sims. Do it for a single size?
+nd_sex_nosize <- expand_grid(
+  quarter_f = factor(c(1:4), levels = levels(diet_model_hybrid$quarter_f)),
+  prey_group = factor(prey_group_levels, levels = prey_group_levels),
+  sex = unique(diet_model_hybrid$sex)
+) |> 
+  mutate(body_length_cm_sc = 0)
+
+pred <- predict(
+  h9, newdata = nd_sex_nosize, 
+  se_fit = TRUE,
+  re_form = NA, re_form_iid = NA
+  )
+
+ggplot(pred, aes(exp(est), reorder(prey_group, exp(est)), color = quarter_f)) + 
+  geom_point(position = position_dodge(width = 0.4)) + 
+  geom_errorbar(aes(xmin = exp(est - est_se*1.96),
+                    xmax = exp(est + est_se*1.96)),
+                width = 0, position = position_dodge(width = 0.4)) +
+  facet_wrap(~sex) +
+  labs(x = "Prey weight [g]", color = "Quarter") +
+  scale_color_brewer(palette = "Dark2") +
+  guides(color = guide_legend(position = "inside")) +
+  theme(axis.title.y = element_blank(),
+        legend.position.inside = c(0.95, 0.15)) 
+  
+# Try with model h9 - sex*size interaction is not massive.
+# pred_h9 <- predict(
+#   h9, newdata = nd_sex, 
+#   re_form = NA, re_form_iid = NA
+#   )
+# 
+# pred_sum_h9 <- pred_h9 |> 
+#   summarise(sum_exp_est = sum(exp(est)), .by = c(quarter_f, body_length_cm_sc, sex))
+# 
+# ggplot(pred_sum_h9, aes(body_length_cm_sc, sum_exp_est, color = sex)) + 
+#   geom_line() + 
+#   facet_wrap(~quarter_f)
+
+# Predict the same with sims
+# nd_hybrid_long <- expand_grid(
+#   quarter_f = factor(c(1:4), levels = levels(diet_model_hybrid$quarter_f)),
+#   prey_group = factor(prey_group_levels, levels = prey_group_levels),
+#   body_length_cm = seq(
+#     min(diet_model_hybrid$body_length_cm_sc), 
+#     max(diet_model_hybrid$body_length_cm_sc),
+#     length.out = 30),
+#   sex = unique(diet_model_hybrid$sex)
+# )
 
 pred_sims <- predict(
-  h11, newdata = nd_hybrid_long, 
+  h9, newdata = nd_sex, 
   re_form = NA, re_form_iid = NA, 
   nsim = 1000) |> 
   as.data.frame(row.names = FALSE)
 
-pred_sims_df <- nd_hybrid_long |> 
+pred_sims_df <- nd_sex |> 
   bind_cols(pred_sims)
 
 plot_sim <- pred_sims_df |> 
   pivot_longer("V1":"V1000", names_to = "sim", values_to = "est") |> 
-  #mutate(life_stage = ifelse(body_length_cm >= 120, "Adult", "Juvenile")) |> 
-  # summarise across length, or fix to a specific length?
-  summarise(est = sum(exp(est)), .by = c(sex, sim, quarter_f, sim)) |> 
-  #summarise(est = mean(est), .by = c(prey_group, sex, sim, quarter_f, life_stage)) |> 
-  pivot_wider(names_from = sex, values_from = est) |> 
+  summarise(sum_exp_est = sum(exp(est)), .by = c(quarter_f, body_length_cm_sc, sex, sim)) |> 
+  summarise(
+    lo = quantile(sum_exp_est, 0.025),
+    hi = quantile(sum_exp_est, 0.975),
+    sum_exp_est = mean(sum_exp_est),
+    .by = c(quarter_f, body_length_cm_sc, sex))
+  # pivot_wider(names_from = sex, values_from = est) |>
+  # mutate(diff = Female - Male)
+
+ggplot(plot_sim, aes(body_length_cm_sc, sum_exp_est, color = sex, fill = sex)) + 
+  geom_line() + 
+  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.3, color = NA) +
+  facet_wrap(~quarter_f)
+
+# Now calculate the differences between male and female
+plot_sim <- pred_sims_df |> 
+  pivot_longer("V1":"V1000", names_to = "sim", values_to = "est") |> 
+  summarise(sum_exp_est = sum(exp(est)), .by = c(quarter_f, body_length_cm_sc, sex, sim)) |> 
+  pivot_wider(names_from = sex, values_from = sum_exp_est) |>
+  mutate(diff = Female - Male) |> 
+  summarise(
+    mean_diff = mean(diff),
+    lo = quantile(diff, 0.025),
+    hi = quantile(diff, 0.975),
+    .by = c(body_length_cm_sc, quarter_f)
+    )
+
+ggplot(plot_sim, aes(body_length_cm_sc, mean_diff)) + 
+  geom_hline(yintercept = 0, lty = 2) +
+  geom_line() + 
+  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.3, color = NA) +
+  facet_wrap(~quarter_f)
+
+# Significance between male and female meaningful?
+diet_model_hybrid$body_length_cm_sc <- (diet_model_hybrid$body_length_cm - mean(diet_model_hybrid$body_length_cm)) / sd(diet_model_hybrid$body_length_cm)
+
+plot_sim <- pred_sims_df |> 
+  pivot_longer("V1":"V1000", names_to = "sim", values_to = "est") |> 
+  mutate(body_length_cm = body_length_cm_sc * sd(diet_model_hybrid$body_length_cm) + mean(diet_model_hybrid$body_length_cm)) |> 
+  mutate(size_cat = ifelse(body_length_cm > 120, "Adult", "Juvenile")) |> 
+  summarise(sum_exp_est = sum(exp(est)), .by = c(quarter_f, sex, size_cat, sim)) |> 
+  pivot_wider(names_from = sex, values_from = sum_exp_est) |>
   mutate(diff = Female - Male)
 
-labs <- plot_sim |> 
-  mutate(pos = ifelse(diff > 0, "fem", "male")) |> 
-  summarise(n = n(), .by = c(quarter_f, pos)) |> 
-  pivot_wider(names_from = pos, values_from = n) |> 
-  mutate(prop = fem / (fem + male))
+labs <- plot_sim |>
+  summarise(
+    p_fem_gt = mean(diff > 0),
+    .by = c(quarter_f, size_cat)
+  )
 
-plot_sim |> 
-  ggplot(aes(as.numeric(as.character(quarter_f)), diff)) +
-  geom_boxplot(aes(group = as.numeric(as.character(quarter_f))),
-               fill = NA, outlier.color = NA) +
-  geom_jitter(data = plot_sim |> 
-                #group_by(quarter_f) |>
-                sample_n(100*4, .by = quarter_f), 
+ggplot(plot_sim, aes(as.numeric(as.character(quarter_f)), diff)) +
+  geom_hline(yintercept = 0, lty = 2) +
+  facet_wrap(~size_cat) +
+  geom_jitter(data = plot_sim |>
+                group_by(quarter_f, size_cat) |> 
+                sample_n(100),
+              aes(as.numeric(as.character(quarter_f)), diff),
               alpha = 0.2, width = 0.2, height = 0) +
-  geom_hline(yintercept = 0, lty = 2) + 
-  #facet_wrap(~life_stage) +
+  geom_boxplot(aes(group = quarter_f), fill = NA, outlier.color = NA, width = 0.2) +
+  geom_violin(aes(group = quarter_f), fill = NA) +
   geom_text(
-  data = labs,
-  aes(
-    as.numeric(as.character(quarter_f)),
-    Inf,
-    label = round(prop, digits = 3)
-  ),
-  vjust = 1.5,
-  inherit.aes = FALSE
-)
-
-
-# Now plot over size, by male and female
-pred_sims_df |> 
-  pivot_longer("V1":"V1000", names_to = "sim", values_to = "est") |> 
-  summarise(exp_est = median(exp(est)), .by = c(quarter_f, prey_group, sex, body_length_cm)) |> 
-  #mutate(exp_est = exp(est)) |> 
-  ggplot(aes(body_length_cm, exp_est, fill = prey_group)) +
-  geom_area() +
-  coord_cartesian(expand = 0) + 
-  facet_grid(sex ~ quarter_f) +
-  geom_vline(xintercept = 133) +
-  geom_hline(yintercept = 0.4) +
-  #facet_wrap( ~ sex) +
-  theme(legend.position = "bottom",
-        legend.title = element_blank())
-
-pred_sims_df |> 
-  pivot_longer("V1":"V1000", names_to = "sim", values_to = "est") |> 
-  summarise(est = mean(est), .by = c(sex, body_length_cm, quarter_f)) |> 
-  mutate(exp_est = exp(est)) |> 
-  ggplot(aes(body_length_cm, exp_est)) +
-  geom_area() +
-  coord_cartesian(expand = 0) + 
-  #facet_grid(sex ~ quarter_f) +
-  facet_grid(quarter_f ~ sex) +
-  theme(legend.position = "bottom",
-        legend.title = element_blank())
+    data = labs,
+    aes(x = as.numeric(as.character(quarter_f)), y = Inf,
+        label = paste0("p = ", round(p_fem_gt, 2))),
+    vjust = 1.5, inherit.aes = FALSE
+  ) +
+  labs(x = "Quarter", y = "Difference in biomass (Female - Male)")
 ```
 
 ## Hybrid biomass predictions per sample
