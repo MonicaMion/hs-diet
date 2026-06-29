@@ -674,15 +674,21 @@ nd_hybrid <- expand_grid(
 
 p_hybrid <- predict(h11, newdata = nd_hybrid, re_form = NA, re_form_iid = NA)
 
-ggplot(p_hybrid, aes(sex, exp(est), fill = prey_group)) +
+fig_sex_quarter <- ggplot(p_hybrid, aes(sex, exp(est), fill = prey_group)) +
   facet_grid(body_length_cm ~ quarter_f) +
   geom_bar(stat = "identity")
+fig_sex_quarter
 
 ggplot(p_hybrid, aes(as.numeric(as.character(quarter_f)), exp(est), fill = prey_group)) +
   facet_wrap(~sex, ncol = 4) +
   geom_bar(stat = "identity")
 
-qqnorm(residuals(h11)); qqline(residuals(h11))
+fig_qqplot <- ggplot(data.frame(res = residuals(h11)), aes(sample = res)) +
+  stat_qq() +
+  stat_qq_line() +
+  labs(x = "Theoretical quantiles", y = "Sample quantiles",
+       title = "Q-Q plot of model residuals")
+fig_qqplot
 
 # Quarter effect for aggregated gadid prey by sex at the same reference seal and year.
 nd_hybrid_gad <- expand_grid(
@@ -831,10 +837,11 @@ plot_sim <- pred_sims_df |>
   # pivot_wider(names_from = sex, values_from = est) |>
   # mutate(diff = Female - Male)
 
-ggplot(plot_sim, aes(body_length_cm_sc, sum_exp_est, color = sex, fill = sex)) + 
-  geom_line() + 
+fig_length_composition <- ggplot(plot_sim, aes(body_length_cm_sc, sum_exp_est, color = sex, fill = sex)) +
+  geom_line() +
   geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.3, color = NA) +
   facet_wrap(~quarter_f)
+fig_length_composition
 
 # Now calculate the differences between male and female
 plot_sim <- pred_sims_df |> 
@@ -872,11 +879,11 @@ labs <- plot_sim |>
     .by = c(quarter_f, size_cat)
   )
 
-ggplot(plot_sim, aes(as.numeric(as.character(quarter_f)), diff)) +
+fig_simulations <- ggplot(plot_sim, aes(as.numeric(as.character(quarter_f)), diff)) +
   geom_hline(yintercept = 0, lty = 2) +
   facet_wrap(~size_cat) +
   geom_jitter(data = plot_sim |>
-                group_by(quarter_f, size_cat) |> 
+                group_by(quarter_f, size_cat) |>
                 sample_n(100),
               aes(as.numeric(as.character(quarter_f)), diff),
               alpha = 0.2, width = 0.2, height = 0) +
@@ -889,6 +896,7 @@ ggplot(plot_sim, aes(as.numeric(as.character(quarter_f)), diff)) +
     vjust = 1.5, inherit.aes = FALSE
   ) +
   labs(x = "Quarter", y = "Difference in biomass (Female - Male)")
+fig_simulations
 ```
 
 ## Hybrid biomass predictions per sample
@@ -1137,4 +1145,32 @@ plot_bio_quarter_gadus
 plot_cod_whiting_time
 plot_bio_space_gadus
 plot_svc
+```
+
+## Save paper figures
+
+```{r save-figures}
+fig_dir <- here::here("paper", "figures")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Figure 1 – stacked prey biomass bars by sex, body length x quarter
+ggsave(file.path(fig_dir, "sex_quarter.pdf"),
+       fig_sex_quarter, width = 9, height = 7)
+
+# Figure 2 – total biomass ribbon over scaled body length by quarter
+ggsave(file.path(fig_dir, "length_composition.pdf"),
+       fig_length_composition, width = 9, height = 6)
+
+# Figure 3 – Female minus Male difference boxplot by quarter x size class
+ggsave(file.path(fig_dir, "simulations.pdf"),
+       fig_simulations, width = 8, height = 5)
+
+# Figure 4 – Gadus morhua biomass by quarter and sex (named object)
+ggsave(file.path(fig_dir, "gadus_quarter.pdf"),
+       plot_bio_quarter_gadus, width = 7, height = 5)
+
+# Figure 5 – QQ plot of model residuals (ggplot2 version)
+pdf(file.path(fig_dir, "qqplot.pdf"), width = 5, height = 5)
+print(fig_qqplot)
+dev.off()
 ```
