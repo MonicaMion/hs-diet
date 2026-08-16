@@ -1,0 +1,1619 @@
+---
+title: "Harbour Seal Ontogenetic Diet Hybrid Models (haddock grouped with pollock/haddock)"
+author: "Max Lindmark & Monica Mion"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format:
+  html:
+    toc: true
+    page-layout: full
+    embed-resources: true
+editor: source
+execute:
+  echo: true
+  eval: true
+  warning: false
+  message: false
+  cache: false
+---
+
+## Purpose
+
+This notebook focuses on ontogenetic variation in diet composition using a hybrid prey-group workflow that splits dominant gadid prey while keeping non-gadid prey grouped at family level. Compared with the base hybrid notebook, confidently identified haddock (`Melanogrammus aeglefinus`) is grouped together with the combined `Pollachius sp. / Melanogrammus aeglefinus` label rather than being pooled into `Other Gadidae`.
+
+The workflow is:
+
+- retain colonies through Onsala only,
+- retain hunted seals only,
+- keep the same dominant non-gadid family grouping as `03b`,
+- split `Gadidae` into the most supported scientific-name labels,
+- fold `Melanogrammus aeglefinus` (haddock) into the combined `Pollachius sp. / Melanogrammus aeglefinus` group,
+- build a hunted-seal sample-by-hybrid-prey-group modelling table,
+- test whether seal length changes diet composition,
+- then test whether sex adds further structure once length is included.
+
+```{r setup}
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(forcats)
+library(stringr)
+library(janitor)
+library(sf)
+library(sdmTMB)
+library(purrr)
+library(rnaturalearth)
+library(ggsidekick)
+library(patchwork)
+
+theme_set(theme_sleek())
+
+home <- here::here()
+
+biomass_file <- file.path(home, "Data", "HS_SKAG_estimated_abundance_biomass_130426.csv")
+
+colony_keep <- c("Koster", "Vaderoarna", "Lysekil", "Marstrand", "Onsala")
+analysis_year_min <- 2013L
+dominant_families <- c("Gadidae", "Clupeidae", "Pleuronectidae", "Gobiidae")
+
+family_palette <- c(
+  "Gadidae"        = "#2E6B1F",
+  "Clupeidae"      = "#1F5AA6",
+  "Pleuronectidae" = "#D94FD3",
+  "Gobiidae"       = "#F39C12",
+  "Other"          = "#9E4A7A",
+  "Total"          = "#000000"
+)
+
+prey_palette_9 <- c(
+  "Gadus morhua"                          = "#0072B2",
+  "Merlangius merlangus"                  = "#56B4E9",
+  "Pollachius sp. / Melanogrammus aeglefinus" = "#009E73",
+  "Gadidae"                               = "#F0E442",
+  "Other Gadidae"                         = "#E69F00",
+  "Clupeidae"                             = "#CC79A7",
+  "Pleuronectidae"                        = "#D55E00",
+  "Gobiidae"                              = "#999999",
+  "Other"                                 = "#000000"
+)
+
+normalize_colony_name <- function(x) {
+  x <- trimws(as.character(x))
+  case_when(
+    grepl("der.*arna", x, ignore.case = TRUE) ~ "Vaderoarna",
+    grepl("^Hallands.*der", x, ignore.case = TRUE) ~ "Hallands Vadero",
+    TRUE ~ x
+  )
+}
+```
+
+## Read and harmonize source data
+
+```{r read-data}
+sample_meta_workbook <- read_csv(biomass_file, show_col_types = FALSE) |>
+  clean_names() |>
+  distinct(sample_id, .keep_all = TRUE) |>
+  transmute(
+    sample_id,
+    year_wb = suppressWarnings(as.integer(year)),
+    month_wb = suppressWarnings(as.integer(month)),
+    quarter_wb = suppressWarnings(as.integer(quarter)),
+    latitude_wb = suppressWarnings(as.numeric(latitude)),
+    longitude_wb = suppressWarnings(as.numeric(longitude)),
+    colony_wb = normalize_colony_name(colony),
+    sex_wb = case_when(
+      sex %in% c("Female", "Male") ~ as.character(sex),
+      TRUE ~ NA_character_
+    ),
+    age_wb = suppressWarnings(as.numeric(age)),
+    body_length_cm_wb = suppressWarnings(as.numeric(body_length_cm)),
+    collection_method_wb = if_else(
+      is.na(collection_method) | collection_method == "",
+      "Unknown",
+      as.character(collection_method)
+    )
+  )
+
+diet_raw <- read_csv(biomass_file, show_col_types = FALSE) |>
+  clean_names() |>
+  left_join(sample_meta_workbook, by = "sample_id") |>
+  mutate(
+    year = coalesce(year_wb, suppressWarnings(as.integer(year))),
+    month = coalesce(month_wb, suppressWarnings(as.integer(month))),
+    quarter = coalesce(quarter_wb, suppressWarnings(as.integer(quarter))),
+    latitude = coalesce(latitude_wb, suppressWarnings(as.numeric(latitude))),
+    longitude = coalesce(longitude_wb, suppressWarnings(as.numeric(longitude))),
+    colony = coalesce(colony_wb, normalize_colony_name(colony)),
+    collection_method = coalesce(collection_method_wb, as.character(collection_method)),
+    collection_method = if_else(is.na(collection_method) | collection_method == "", "Unknown", collection_method),
+    family = if_else(is.na(family) | family == "", "Unknown", family),
+    prey_species = prey_species_lat,
+    sex = coalesce(sex_wb, case_when(
+      sex %in% c("Female", "Male") ~ as.character(sex),
+      TRUE ~ NA_character_
+    )),
+    age = coalesce(age_wb, suppressWarnings(as.numeric(age))),
+    body_length_cm = coalesce(body_length_cm_wb, suppressWarnings(as.numeric(body_length_cm))),
+    quarter = coalesce(quarter, ((month - 1L) %/% 3L) + 1L)
+  ) |>
+  select(-ends_with("_wb"))
+
+sample_meta_all <- diet_raw |>
+  filter(!is.na(sample_id), !is.na(year), !is.na(latitude), !is.na(longitude)) |>
+  distinct(sample_id, .keep_all = TRUE) |>
+  transmute(
+    sample_id,
+    year,
+    month,
+    quarter,
+    lat = latitude,
+    lon = longitude,
+    collection_method,
+    colony,
+    sex,
+    age,
+    body_length_cm
+  )
+
+diet_rows_all <- diet_raw |>
+  filter(
+    !is.na(sample_id),
+    !is.na(biomass_not_corrected),
+    !is.na(prey_species),
+    prey_species != "",
+    tolower(prey_species) != "non prey item"
+  ) |>
+  transmute(
+    sample_id,
+    family,
+    biomass_kg = biomass_not_corrected / 1000
+  ) |>
+  summarise(biomass_kg = sum(biomass_kg, na.rm = TRUE), .by = c(sample_id, family))
+
+sample_totals_all <- diet_rows_all |>
+  summarise(sum_biomass_kg = sum(biomass_kg, na.rm = TRUE), .by = sample_id)
+
+sample_meta_filtered <- sample_meta_all |>
+  left_join(sample_totals_all, by = "sample_id") |>
+  mutate(sum_biomass_kg = coalesce(sum_biomass_kg, 0)) |>
+  filter(
+    collection_method == "Hunt",
+    colony %in% colony_keep,
+    sum_biomass_kg > 0
+  )
+
+if (nrow(sample_meta_filtered) == 0) {
+  stop("No hunted samples remain after filtering by colony and positive total biomass.")
+}
+
+analysis_year_max <- max(sample_meta_filtered$year, na.rm = TRUE)
+
+sample_meta_main <- sample_meta_filtered |>
+  filter(year >= analysis_year_min, year <= analysis_year_max)
+
+diet_rows_main <- diet_rows_all |>
+  semi_join(sample_meta_main, by = "sample_id")
+```
+
+## Support summaries and family grouping
+
+```{r support-tables}
+n_main_samples <- nrow(sample_meta_main)
+
+family_levels <- unique(c(dominant_families, "Other"))
+
+family_support_main <- diet_rows_main |>
+  summarise(
+    total_biomass_kg = sum(biomass_kg, na.rm = TRUE),
+    n_samples_present = n_distinct(sample_id[biomass_kg > 0]),
+    .by = family
+  ) |>
+  mutate(
+    prevalence = n_samples_present / n_main_samples,
+    zero_rate = 1 - prevalence
+  ) |>
+  arrange(desc(total_biomass_kg))
+
+diet_rows_grouped <- diet_rows_main |>
+  mutate(family = if_else(family %in% dominant_families, family, "Other")) |>
+  summarise(biomass_kg = sum(biomass_kg, na.rm = TRUE), .by = c(sample_id, family))
+
+family_support_grouped <- diet_rows_grouped |>
+  summarise(
+    total_biomass_kg = sum(biomass_kg, na.rm = TRUE),
+    n_samples_present = n_distinct(sample_id[biomass_kg > 0]),
+    .by = family
+  ) |>
+  mutate(
+    prevalence = n_samples_present / n_main_samples,
+    zero_rate = 1 - prevalence,
+    family = factor(family, levels = family_levels)
+  ) |>
+  arrange(family)
+```
+
+## Build hunted-only model table
+
+```{r build-model-table}
+year_center <- mean(sample_meta_main$year, na.rm = TRUE)
+
+diet_model_all <- sample_meta_main |>
+  select(sample_id, year, month, quarter, lat, lon, colony, sum_biomass_kg, sex, age, body_length_cm) |>
+  expand_grid(family = family_levels) |>
+  left_join(diet_rows_grouped, by = c("sample_id", "family")) |>
+  mutate(
+    biomass_kg = coalesce(biomass_kg, 0),
+    present = as.integer(biomass_kg > 0),
+    prop_biomass = if_else(sum_biomass_kg > 0, biomass_kg / sum_biomass_kg, 0),
+    year_ct = year - year_center,
+    colony = factor(colony, levels = colony_keep),
+    family = factor(family, levels = family_levels),
+    sex = factor(sex, levels = c("Female", "Male")),
+    year_f = factor(year),
+    quarter_f = factor(quarter),
+    month_f = factor(month)
+  ) |>
+  add_utm_columns(ll_names = c("lon", "lat"))
+
+diet_model <- diet_model_all |>
+  filter(!is.na(body_length_cm))
+
+diet_model_sex <- diet_model |>
+  filter(!is.na(sex))
+
+diet_model |>
+  summarise(
+    n_samples = n_distinct(sample_id),
+    n_rows = n(),
+    min_year = min(year),
+    max_year = max(year),
+    n_families = n_distinct(family),
+    length_min = min(body_length_cm),
+    length_max = max(body_length_cm)
+  )
+```
+
+## Support diagnostics
+
+```{r support-plots}
+hunt_samples_by_year <- sample_meta_main |>
+  count(year, name = "n_samples")
+
+missing_covariates <- sample_meta_main |>
+  summarise(
+    n_samples = n(),
+    n_length = sum(!is.na(body_length_cm)),
+    n_sex = sum(!is.na(sex)),
+    n_age = sum(!is.na(age)),
+    n_length_sex = sum(!is.na(body_length_cm) & !is.na(sex)),
+    n_all_three = sum(!is.na(body_length_cm) & !is.na(sex) & !is.na(age))
+  )
+
+age_length_plot <- sample_meta_main |>
+  filter(!is.na(body_length_cm), !is.na(age), !is.na(sex)) |>
+  ggplot(aes(age, body_length_cm, color = sex)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 1) +
+  labs(
+    title = "Relation between seal age and length",
+    subtitle = "Separate fitted lines for female and male hunted seals",
+    x = "Age",
+    y = "Body length (cm)",
+    color = "Sex"
+  )
+
+length_histogram <- sample_meta_main |>
+  filter(!is.na(body_length_cm)) |>
+  ggplot(aes(body_length_cm)) +
+  geom_histogram(binwidth = 5, color = "white", fill = "grey40") +
+  labs(
+    title = "Seal length distribution in hunted samples",
+    x = "Body length (cm)",
+    y = "Samples"
+  )
+
+length_histogram_sex_colony <- sample_meta_main |>
+  filter(!is.na(body_length_cm), !is.na(sex)) |>
+  mutate(colony = factor(colony, levels = colony_keep)) |>
+  ggplot(aes(body_length_cm, fill = sex)) +
+  geom_histogram(binwidth = 5, color = "white") +
+  facet_wrap(~colony, ncol = 1, scales = "free_y") +
+  labs(
+    title = "Seal length distribution in hunted samples by colony and sex",
+    subtitle = "Colonies ordered from north to south",
+    x = "Body length (cm)",
+    y = "Samples",
+    fill = "Sex"
+  )
+
+length_by_year <- sample_meta_main |>
+  filter(!is.na(body_length_cm)) |>
+  ggplot(aes(year, body_length_cm)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  labs(
+    title = "Seal length over time",
+    x = "Year",
+    y = "Body length (cm)"
+  )
+
+sex_balance <- sample_meta_main |>
+  filter(!is.na(sex)) |>
+  count(sex) |>
+  ggplot(aes(sex, n, fill = sex)) +
+  geom_col(show.legend = FALSE) +
+  labs(
+    title = "Sex balance in hunted samples",
+    x = NULL,
+    y = "Samples"
+  )
+
+sex_balance_colony <- sample_meta_main |>
+  filter(!is.na(sex)) |>
+  mutate(colony = factor(colony, levels = colony_keep)) |>
+  count(colony, sex, name = "n") |>
+  group_by(colony) |>
+  mutate(
+    total_n = sum(n),
+    prop = n / total_n
+  ) |>
+  ungroup() |>
+  ggplot(aes(colony, prop, fill = sex)) +
+  geom_col() +
+  geom_text(
+    data = ~ distinct(.x, colony, total_n),
+    aes(x = colony, y = 1.02, label = total_n),
+    inherit.aes = FALSE,
+    vjust = 0
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, 1.08),
+    expand = c(0, 0)
+  ) +
+  labs(
+    title = "Relative sex composition by colony",
+    subtitle = "Numbers above bars show total hunted samples with known sex",
+    x = NULL,
+    y = "Relative abundance",
+    fill = "Sex"
+  )
+
+family_support_plot <- family_support_grouped |>
+  mutate(family = fct_reorder(as.character(family), total_biomass_kg)) |>
+  ggplot(aes(total_biomass_kg, family)) +
+  geom_col(fill = "steelblue") +
+  labs(
+    title = "Grouped prey families retained for modelling",
+    subtitle = "Same dominant-family set as 03b",
+    x = "Total biomass (kg)",
+    y = NULL
+  )
+
+missing_covariates
+hunt_samples_by_year
+age_length_plot
+length_histogram
+length_histogram_sex_colony
+length_by_year
+sex_balance
+sex_balance_colony
+family_support_plot
+```
+
+## Prediction grid
+
+```{r prediction-grid}
+d <- diet_model
+
+hull_idx <- chull(d$X, d$Y)
+hull_coords <- cbind(d$X[hull_idx], d$Y[hull_idx])
+hull_coords <- rbind(hull_coords, hull_coords[1, ])
+
+sp_poly <- sp::SpatialPolygons(
+  list(sp::Polygons(list(sp::Polygon(hull_coords)), ID = 1))
+)
+
+sp_poly_df <- sp::SpatialPolygonsDataFrame(
+  sp_poly,
+  data = data.frame(ID = 1)
+)
+
+cell_width <- 0.5
+
+pred_grid_base <- expand.grid(
+  X = seq(min(d$X), max(d$X), cell_width),
+  Y = seq(min(d$Y), max(d$Y), cell_width),
+  year = seq(min(d$year), max(d$year))
+)
+
+sp::coordinates(pred_grid_base) <- c("X", "Y")
+
+inside <- !is.na(sp::over(pred_grid_base, as(sp_poly_df, "SpatialPolygons")))
+
+pred_grid_base <- pred_grid_base[inside, ]
+
+pred_grid_base <- as.data.frame(pred_grid_base) |>
+  mutate(
+    year_ct = year - year_center,
+    year_f = factor(year, levels = levels(diet_model$year_f))
+  )
+
+land <- ne_countries(scale = "large", returnclass = "sf") |>
+  st_transform(32632)
+```
+
+## Mesh
+
+```{r mesh}
+mesh_cutoff_km <- 0.5
+
+mesh <- make_mesh(diet_model, xy_cols = c("X", "Y"), type = "cutoff", cutoff = mesh_cutoff_km)
+
+plot(mesh)
+```
+
+## Shared prediction reference
+
+```{r shared-prediction-reference}
+prediction_reference <- sample_meta_main |>
+  filter(!is.na(body_length_cm), !is.na(sex)) |>
+  summarise(
+    pred_year = round(median(sort(unique(year)))),
+    pred_length_cm = median(body_length_cm, na.rm = TRUE)
+  )
+
+pred_year_common <- prediction_reference$pred_year
+pred_length_common <- prediction_reference$pred_length_cm
+```
+
+## Hybrid prey-group questions: sex, length, year, space
+
+This section uses one hybrid prey grouping for the hunted samples:
+
+- split `Gadidae` into the most supported scientific-name labels,
+- fold confidently identified `Melanogrammus aeglefinus` (haddock) into the
+  combined `Pollachius sp. / Melanogrammus aeglefinus` group,
+- keep the remaining gadids (`Trisopterus` spp., `Pollachius virens`,
+  `Pollachius pollachius`, `Raniceps raninus`, `Gadiculus argenteus`) as
+  `Other Gadidae`,
+- keep non-gadid prey at the same grouped family level used above.
+
+```{r hybrid-prey-data}
+gad_species_keep <- c(
+  "Gadus morhua",
+  "Merlangius merlangus",
+  "Pollachius sp. / Melanogrammus aeglefinus",
+  "Gadidae"
+)
+
+prey_group_levels <- c(
+  gad_species_keep,
+  "Other Gadidae",
+  "Clupeidae",
+  "Pleuronectidae",
+  "Gobiidae",
+  "Other"
+)
+
+hybrid_rows <- diet_raw |>
+  filter(
+    !is.na(sample_id),
+    !is.na(biomass_not_corrected),
+    !is.na(prey_species),
+    prey_species != "",
+    tolower(prey_species) != "non prey item"
+  ) |>
+  transmute(
+    sample_id,
+    prey_group = case_when(
+      family == "Gadidae" & prey_species %in% gad_species_keep ~ prey_species,
+      family == "Gadidae" & prey_species == "Melanogrammus aeglefinus" ~ "Pollachius sp. / Melanogrammus aeglefinus",
+      family == "Gadidae" ~ "Other Gadidae",
+      family == "Clupeidae" ~ "Clupeidae",
+      family == "Pleuronectidae" ~ "Pleuronectidae",
+      family == "Gobiidae" ~ "Gobiidae",
+      TRUE ~ "Other"
+    ),
+    biomass_kg = biomass_not_corrected / 1000
+  ) |>
+  summarise(biomass_kg = sum(biomass_kg, na.rm = TRUE), .by = c(sample_id, prey_group))
+
+prey_group_support <- hybrid_rows |>
+  semi_join(sample_meta_main |> filter(!is.na(body_length_cm), !is.na(sex)), by = "sample_id") |>
+  summarise(
+    total_biomass_kg = sum(biomass_kg, na.rm = TRUE),
+    n_samples_present = n_distinct(sample_id[biomass_kg > 0]),
+    .by = prey_group
+  ) |>
+  mutate(prey_group = factor(prey_group, levels = prey_group_levels)) |>
+  arrange(prey_group)
+
+diet_model_hybrid <- sample_meta_main |>
+  filter(!is.na(body_length_cm), !is.na(sex)) |>
+  select(sample_id, year, month, quarter, lat, lon, colony, sum_biomass_kg, sex, body_length_cm) |>
+  expand_grid(prey_group = prey_group_levels) |>
+  left_join(hybrid_rows, by = c("sample_id", "prey_group")) |>
+  mutate(
+    biomass_kg = coalesce(biomass_kg, 0),
+    year_ct = year - year_center,
+    year_f = factor(year),
+    quarter_f = factor(quarter),
+    prey_group = factor(prey_group, levels = prey_group_levels),
+    sex = factor(sex, levels = c("Female", "Male"))
+  ) |>
+  add_utm_columns(ll_names = c("lon", "lat"))
+
+prey_group_support
+```
+
+## Dataset summary
+
+Counts and summary statistics for the modelling dataset (`diet_model_hybrid`): hunted seals with complete body length and sex, positive total biomass, 2013 onward, retained colonies only.
+
+```{r dataset-summary}
+n_model_samples <- n_distinct(diet_model_hybrid$sample_id)
+n_model_rows <- nrow(diet_model_hybrid)
+
+summary_samples <- diet_model_hybrid |>
+  distinct(sample_id, year, quarter, sex, body_length_cm) |>
+  summarise(
+    n_samples = n(),
+    n_female = sum(sex == "Female"),
+    n_male = sum(sex == "Male"),
+    length_min_cm = min(body_length_cm),
+    length_median_cm = median(body_length_cm),
+    length_max_cm = max(body_length_cm),
+    year_min = min(year),
+    year_max = max(year)
+  )
+
+summary_samples |>
+  pivot_longer(everything(), names_to = "statistic", values_to = "value")
+
+summary_length_sex <- diet_model_hybrid |>
+  distinct(sample_id, sex, body_length_cm) |>
+  summarise(
+    n = n(),
+    length_min_cm = min(body_length_cm),
+    length_median_cm = median(body_length_cm),
+    length_max_cm = max(body_length_cm),
+    .by = sex
+  )
+
+summary_quarter <- diet_model_hybrid |>
+  distinct(sample_id, quarter_f) |>
+  count(quarter_f, name = "n_samples")
+
+summary_prey <- diet_model_hybrid |>
+  summarise(
+    n_present = sum(biomass_kg > 0),
+    n_zero = sum(biomass_kg == 0),
+    total_biomass_kg = sum(biomass_kg, na.rm = TRUE),
+    .by = prey_group
+  ) |>
+  mutate(
+    prevalence = n_present / n_model_samples,
+    prey_group = factor(prey_group, levels = prey_group_levels)
+  ) |>
+  arrange(prey_group)
+
+tibble(
+  n_model_samples = n_model_samples,
+  n_prey_groups = length(prey_group_levels),
+  n_rows = n_model_rows,
+  n_zero_rows = sum(diet_model_hybrid$biomass_kg == 0),
+  n_nonzero_rows = sum(diet_model_hybrid$biomass_kg > 0)
+)
+
+summary_length_sex
+summary_quarter
+summary_prey
+```
+
+```{r fit-hybrid-models}
+mesh_hybrid <- make_mesh(diet_model_hybrid, xy_cols = c("X", "Y"), type = "cutoff", cutoff = mesh_cutoff_km)
+
+diet_model_hybrid$body_length_cm_sc <- (diet_model_hybrid$body_length_cm - mean(diet_model_hybrid$body_length_cm)) / sd(diet_model_hybrid$body_length_cm)
+
+h1 <- sdmTMB(
+  formula = biomass_kg ~ sex * prey_group + body_length_cm_sc + (1 | year_f),
+  data = diet_model_hybrid,
+  mesh = mesh_hybrid,
+  family = tweedie(),
+  spatial = "on"
+)
+
+h2 <- sdmTMB(
+  formula = biomass_kg ~ sex * prey_group + body_length_cm_sc * prey_group + (1 | year_f),
+  data = diet_model_hybrid,
+  mesh = mesh_hybrid,
+  family = tweedie(),
+  spatial = "on"
+)
+
+h3 <- sdmTMB(
+  formula = biomass_kg ~ sex * prey_group + s(body_length_cm_sc, by = prey_group) + (1 | year_f),
+  data = diet_model_hybrid,
+  mesh = mesh_hybrid,
+  family = tweedie(),
+  spatial = "on"
+)
+
+h4 <- sdmTMB(
+  formula = biomass_kg ~ sex * prey_group + body_length_cm_sc * sex + (1 | year_f),
+  data = diet_model_hybrid,
+  mesh = mesh_hybrid,
+  family = tweedie(),
+  spatial = "on"
+)
+
+h5 <- sdmTMB(
+  formula = biomass_kg ~ sex * prey_group + body_length_cm_sc + (1 | year_f),
+  data = diet_model_hybrid,
+  mesh = mesh_hybrid,
+  family = tweedie(),
+  spatial = "off",
+  spatial_varying = ~ 0 + prey_group
+)
+
+h6 <- sdmTMB(
+  formula = biomass_kg ~ sex * prey_group + body_length_cm_sc * prey_group + (1 | year_f),
+  data = diet_model_hybrid,
+  mesh = mesh_hybrid,
+  family = tweedie(),
+  spatial = "off",
+  spatial_varying = ~ 0 + prey_group
+)
+
+h7 <- sdmTMB(
+  formula = biomass_kg ~ body_length_cm * prey_group * sex + (1 | year_f),
+  data = diet_model_hybrid,
+  mesh = mesh_hybrid,
+  family = tweedie(),
+  spatial = "off",
+  spatial_varying = ~ 0 + prey_group
+)
+
+h8 <- sdmTMB(
+  formula = biomass_kg ~ sex * prey_group + body_length_cm_sc * prey_group + (1 | year_f),
+  data = diet_model_hybrid,
+  mesh = mesh_hybrid,
+  family = tweedie(),
+  spatial = "off",
+  spatiotemporal = "iid",
+  time = "year",
+  spatial_varying = ~ 0 + prey_group
+)
+
+h9 <- sdmTMB(
+  formula = biomass_kg ~ sex * prey_group + quarter_f * sex + body_length_cm_sc * prey_group + (1 | year_f),
+  data = diet_model_hybrid,
+  mesh = mesh_hybrid,
+  family = tweedie(),
+  spatial = "off",
+  spatial_varying = ~ 0 + prey_group
+)
+
+h10 <- sdmTMB(
+  formula = biomass_kg ~ sex * prey_group + quarter_f + 
+    body_length_cm_sc * prey_group + (1 | year_f),
+  data = diet_model_hybrid,
+  mesh = mesh_hybrid,
+  family = tweedie(),
+  spatial = "off",
+  spatial_varying = ~ 0 + prey_group
+)
+
+h11 <- sdmTMB(
+  formula = biomass_kg ~ sex * prey_group + quarter_f * sex + body_length_cm_sc * prey_group + body_length_cm_sc * sex + (1 | year_f),
+  data = diet_model_hybrid,
+  mesh = mesh_hybrid,
+  family = tweedie(),
+  spatial = "off",
+  spatial_varying = ~ 0 + prey_group
+)
+
+# Full model-comparison table including h11 (h9 is used for inference;
+# h11 = h9 + body_length_cm_sc:sex and is used for all prediction figures).
+# The spatiotemporal model h8 has the lowest AIC but no explicit season effect.
+aic_hybrid <- tibble(
+  Model = paste0("h", 1:11),
+  AIC = map_dbl(list(h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11), AIC)
+) |>
+  mutate(delta_AIC = AIC - min(AIC)) |>
+  arrange(AIC)
+
+print(aic_hybrid, digits = 5)
+
+# Direct h9 vs h11 comparison for the prediction-model decision.
+aic_h9_h11 <- tibble(
+  Model = c("h9", "h11"),
+  AIC = c(AIC(h9), AIC(h11))
+) |>
+  mutate(delta_AIC = AIC - min(AIC))
+aic_h9_h11
+
+# Maybe prey*quarter as well? Then we might just do a 3-way interaction, which may or may not be supported..
+```
+
+```{r}
+# biomass_kg ~ sex * prey_group + quarter_f * sex + body_length_cm_sc * prey_group + (1 | year_f)
+# tidy(h9) |> as.data.frame()
+# 
+# # female, q1?
+# ggeffects::ggpredict(h9, terms = c("quarter_f", "sex"))
+# 
+# ggeffects::ggpredict(h9, terms = c("quarter_f", "sex")) |>
+#   plot()
+
+```
+
+```{r hybrid-level-diagnostics}
+pred_year_hybrid <- pred_year_common
+pred_length_hybrid <- pred_length_common
+
+# Season effects from the hybrid model using the same reference seal and year as the family plots.
+nd_hybrid <- expand_grid(
+  quarter_f = factor(c(1:4), levels = levels(diet_model_hybrid$quarter_f)),
+  prey_group = factor(prey_group_levels, levels = prey_group_levels),
+  sex = unique(diet_model_hybrid$sex),
+  body_length_cm = c(80, 110, 140)
+) |>
+  mutate(
+    body_length_cm_sc = (body_length_cm - mean(diet_model_hybrid$body_length_cm)) / sd(diet_model_hybrid$body_length_cm),
+    year = pred_year_hybrid,
+    year_ct = year - year_center,
+    year_f = factor(year, levels = levels(diet_model_hybrid$year_f)),
+    X = median(diet_model_hybrid$X, na.rm = TRUE),
+    Y = median(diet_model_hybrid$Y, na.rm = TRUE)
+  )
+
+p_hybrid <- predict(h11, newdata = nd_hybrid, re_form = NA, re_form_iid = NA)
+
+panel_tags <- expand_grid(
+  body_length_cm = c(80, 110, 140),
+  quarter_f = factor(1:4, levels = levels(diet_model_hybrid$quarter_f))
+) |>
+  mutate(tag = letters[seq_len(n())])
+
+fig_sex_quarter <- ggplot(p_hybrid, aes(sex, exp(est), fill = prey_group)) +
+  facet_grid(body_length_cm ~ quarter_f) +
+  geom_bar(stat = "identity") +
+  geom_text(
+    data = panel_tags,
+    aes(x = Inf, y = Inf, label = tag),
+    hjust = 1.3, vjust = 1.4,
+    inherit.aes = FALSE, size = 3.5, fontface = "bold"
+  ) +
+  scale_fill_manual(values = prey_palette_9) +
+  labs(x = "Sex", y = "Predicted biomass per sample (kg)", fill = "Prey group")
+fig_sex_quarter
+
+ggplot(p_hybrid, aes(as.numeric(as.character(quarter_f)), exp(est), fill = prey_group)) +
+  facet_wrap(~sex, ncol = 4) +
+  geom_bar(stat = "identity")
+
+fig_qqplot <- ggplot(data.frame(res = residuals(h11)), aes(sample = res)) +
+  stat_qq() +
+  stat_qq_line() +
+  labs(x = "Theoretical quantiles", y = "Sample quantiles",
+       title = "Q-Q plot of model residuals")
+fig_qqplot
+
+# Quarter effect for aggregated gadid prey by sex at the same reference seal and year.
+nd_hybrid_gad <- expand_grid(
+  quarter_f = factor(c(1:4), levels = levels(diet_model_hybrid$quarter_f)),
+  sex = unique(diet_model_hybrid$sex),
+  prey_group = factor(c(gad_species_keep, "Other Gadidae"), levels = prey_group_levels)
+) |>
+  mutate(
+    body_length_cm = pred_length_hybrid,
+    body_length_cm_sc = (body_length_cm - mean(diet_model_hybrid$body_length_cm)) / sd(diet_model_hybrid$body_length_cm),
+    year = pred_year_hybrid,
+    year_ct = year - year_center,
+    year_f = factor(year, levels = levels(diet_model_hybrid$year_f)),
+    X = median(diet_model_hybrid$X, na.rm = TRUE),
+    Y = median(diet_model_hybrid$Y, na.rm = TRUE)
+  )
+
+p_hybrid_gad <- predict(h11, newdata = nd_hybrid_gad, re_form = NA, re_form_iid = NA)
+
+hybrid_gad_quarter <- nd_hybrid_gad |>
+  bind_cols(as_tibble(p_hybrid_gad) |> select(est)) |>
+  mutate(biomass = exp(est)) |>
+  summarise(biomass = sum(biomass), .by = c(quarter_f, sex))
+
+ggplot(hybrid_gad_quarter, aes(as.numeric(as.character(quarter_f)), biomass, color = sex)) +
+  geom_line()
+
+plot(ggeffects::ggpredict(h11, c("sex", "prey_group", "quarter_f"))) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+ggeffects::ggpredict(h11, c("sex"))
+ggeffects::ggpredict(h11, c("sex", "prey_group"))
+plot(ggeffects::ggpredict(h11, c("sex", "prey_group"))) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+plot(ggeffects::ggpredict(h11, c("body_length_cm_sc", "prey_group")))
+
+plot(ggeffects::ggpredict(h11, c("body_length_cm_sc", "prey_group", "sex")))
+
+diet_model_hybrid |>
+  distinct(sample_id, body_length_cm, sex) |>
+  ggplot(aes(body_length_cm, fill = sex)) +
+  geom_histogram()
+
+diet_model_hybrid |>
+  distinct(sample_id, month, sex) |>
+  ggplot(aes(as.factor(month), fill = sex)) +
+  geom_bar()
+```
+
+## h9 vs h11: why all prediction figures use h11
+
+h9 is the model used for parameter inference and its equation is reported in the paper Methods. Note that the spatiotemporal model h8 has the lowest AIC overall but contains no explicit season effect; h9 is the best-supported model that retains an explicit season `x` sex interaction. All prediction figures (sex, length, quarter, space) are generated from h11, which adds a `body_length_cm_sc:sex` interaction to h9. The rationale:
+
+1. **Biological motivation** — harbour seals are sexually size-dimorphic, and sex-specific length-biomass relationships are expected from sex-specific foraging behaviour and reproductive energetics. h11 was fitted to explicitly evaluate this biological hypothesis rather than to chase a lower AIC.
+2. **Model-selection uncertainty** — h9 and h11 differ by a single interaction term (1 df). The $\Delta$AIC between them is small (see `aic_h9_h11`), so standard model-selection criteria do not clearly separate the two models.
+3. **Prediction invariance** — the h9 and h11 predictions used in the figures are effectively identical (correlation and maximum relative difference below), so the figure pipeline is not affected by the choice between the two models.
+4. **No untested constraint** — h9 forces the length effect to be identical for females and males for every prey group. h11 relaxes exactly this constraint for the sex-comparison figures being shown, which is the honest choice when the figures illustrate sex differences.
+
+```{r hybrid-model-comparison}
+# sex * length interaction estimate from h11
+h11_sex_length <- tidy(h11, effects = "fixed", conf.int = TRUE) |>
+  filter(grepl("body_length_cm_sc.*sexMale|sexMale.*body_length_cm_sc", term))
+h11_sex_length
+
+# convergence checks
+sanity(h9)
+sanity(h11)
+
+# Prediction invariance on the same grid used for Fig 2 (sex_quarter).
+p_invar_h9 <- predict(h9, newdata = nd_hybrid, re_form = NA, re_form_iid = NA)
+p_invar_h11 <- predict(h11, newdata = nd_hybrid, re_form = NA, re_form_iid = NA)
+
+invar_check <- nd_hybrid |>
+  mutate(
+    pred_h9 = exp(p_invar_h9$est),
+    pred_h11 = exp(p_invar_h11$est)
+  ) |>
+  summarise(
+    cor = cor(pred_h9, pred_h11),
+    max_abs_diff = max(abs(pred_h9 - pred_h11)),
+    max_rel_diff = max(abs(pred_h9 - pred_h11) / pred_h9)
+  )
+invar_check
+
+p_invar <- nd_hybrid |>
+  mutate(
+    pred_h9 = exp(p_invar_h9$est),
+    pred_h11 = exp(p_invar_h11$est)
+  ) |>
+  ggplot(aes(pred_h9, pred_h11)) +
+  geom_abline(intercept = 0, slope = 1, lty = 2) +
+  geom_point(alpha = 0.3) +
+  labs(x = "Predicted biomass, h9 (kg)", y = "Predicted biomass, h11 (kg)")
+p_invar
+```
+
+## Model details reported in the paper Methods and Results
+
+Values used in the paper text (Methods: Tweedie power, year random intercept, mesh resolution; Results: h9 fixed-effect estimates with 95% CIs and variance components).
+
+```{r model-details}
+h9_ran_pars <- tidy(h9, effects = "ran_pars") |>
+  select(group_name, term, estimate) |>
+  mutate(estimate = round(estimate, 4))
+
+h9_ran_pars
+
+h9_ran_pars |>
+  filter(term %in% c("tweedie_p", "phi", "sd__(Intercept)")) |>
+  mutate(parameter = case_when(
+    term == "tweedie_p" ~ "Tweedie power p",
+    term == "phi" ~ "Tweedie dispersion",
+    term == "sd__(Intercept)" ~ "Year random intercept SD"
+  )) |>
+  select(parameter, estimate)
+
+tibble(
+  parameter = c("mesh_cutoff_km", "n_mesh_knots", "n_years"),
+  value = c(mesh_cutoff_km, mesh_hybrid$mesh$n, n_distinct(diet_model_hybrid$year_f))
+)
+
+h9_fixed <- tidy(h9, effects = "fixed", conf.int = TRUE) |>
+  select(term, estimate, conf.low, conf.high) |>
+  mutate(across(where(is.numeric), round, 3))
+print(h9_fixed, n = 40)
+```
+
+## Predict with sims to get uncertainty on prey, sex and quarter
+
+```{r}
+# formula = biomass_kg ~ sex * prey_group + quarter_f * sex + body_length_cm_sc * prey_group + body_length_cm_sc * sex + (1 | year_f)
+
+nd_sex <- expand_grid(
+  quarter_f = factor(c(1:4), levels = levels(diet_model_hybrid$quarter_f)),
+  prey_group = factor(prey_group_levels, levels = prey_group_levels),
+  body_length_cm_sc = seq(
+    min(diet_model_hybrid$body_length_cm_sc), 
+    max(diet_model_hybrid$body_length_cm_sc),
+    length.out = 30),
+  sex = unique(diet_model_hybrid$sex)
+)
+
+# predict without sims
+pred <- predict(
+  h11, newdata = nd_sex, 
+  re_form = NA, re_form_iid = NA
+  )
+
+pred_sum <- pred |> 
+  summarise(sum_exp_est = sum(exp(est)), .by = c(quarter_f, body_length_cm_sc, sex))
+
+ggplot(pred_sum, aes(body_length_cm_sc, sum_exp_est, color = sex)) + 
+  geom_line() + 
+  facet_wrap(~quarter_f)
+
+# Now don't summarise and instead plot by prey group
+# Predict without sims. Do it for a single size?
+nd_sex_nosize <- expand_grid(
+  quarter_f = factor(c(1:4), levels = levels(diet_model_hybrid$quarter_f)),
+  prey_group = factor(prey_group_levels, levels = prey_group_levels),
+  sex = unique(diet_model_hybrid$sex)
+) |> 
+  mutate(body_length_cm_sc = 0)
+
+pred <- predict(
+  h11, newdata = nd_sex_nosize, 
+  se_fit = TRUE,
+  re_form = NA, re_form_iid = NA
+  )
+
+ggplot(pred, aes(exp(est), reorder(prey_group, exp(est)), color = quarter_f)) + 
+  geom_point(position = position_dodge(width = 0.4)) + 
+  geom_errorbar(aes(xmin = exp(est - est_se*1.96),
+                    xmax = exp(est + est_se*1.96)),
+                width = 0, position = position_dodge(width = 0.4)) +
+  facet_wrap(~sex) +
+  labs(x = "Prey weight [g]", color = "Quarter") +
+  scale_color_brewer(palette = "Dark2") +
+  guides(color = guide_legend(position = "inside")) +
+  theme(axis.title.y = element_blank(),
+        legend.position.inside = c(0.95, 0.15)) 
+  
+# The sex*size interaction in h11 is modest but non-negligible; h11 is used for
+# all prediction figures because it does not impose an equality-of-slopes
+# constraint on the sex comparisons, and its predictions are effectively
+# identical to h9 (see `invar_check` above).
+# pred_h9 <- predict(
+#   h9, newdata = nd_sex, 
+#   re_form = NA, re_form_iid = NA
+#   )
+# 
+# pred_sum_h9 <- pred_h9 |> 
+#   summarise(sum_exp_est = sum(exp(est)), .by = c(quarter_f, body_length_cm_sc, sex))
+# 
+# ggplot(pred_sum_h9, aes(body_length_cm_sc, sum_exp_est, color = sex)) + 
+#   geom_line() + 
+#   facet_wrap(~quarter_f)
+
+# Predict the same with sims
+# nd_hybrid_long <- expand_grid(
+#   quarter_f = factor(c(1:4), levels = levels(diet_model_hybrid$quarter_f)),
+#   prey_group = factor(prey_group_levels, levels = prey_group_levels),
+#   body_length_cm = seq(
+#     min(diet_model_hybrid$body_length_cm_sc), 
+#     max(diet_model_hybrid$body_length_cm_sc),
+#     length.out = 30),
+#   sex = unique(diet_model_hybrid$sex)
+# )
+
+set.seed(42)
+
+pred_sims <- predict(
+  h11, newdata = nd_sex, 
+  re_form = NA, re_form_iid = NA, 
+  nsim = 1000) |> 
+  as.data.frame(row.names = FALSE)
+
+pred_sims_df <- nd_sex |> 
+  bind_cols(pred_sims)
+
+plot_sim <- pred_sims_df |> 
+  pivot_longer("V1":"V1000", names_to = "sim", values_to = "est") |> 
+  summarise(sum_exp_est = sum(exp(est)), .by = c(quarter_f, body_length_cm_sc, sex, sim)) |> 
+  summarise(
+    lo = quantile(sum_exp_est, 0.025),
+    hi = quantile(sum_exp_est, 0.975),
+    sum_exp_est = mean(sum_exp_est),
+    .by = c(quarter_f, body_length_cm_sc, sex))
+  # pivot_wider(names_from = sex, values_from = est) |>
+  # mutate(diff = Female - Male)
+
+len_mean <- mean(diet_model_hybrid$body_length_cm)
+len_sd <- sd(diet_model_hybrid$body_length_cm)
+
+fig_length_composition <- ggplot(plot_sim, aes(body_length_cm_sc, sum_exp_est, color = sex, fill = sex)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.3, color = NA) +
+  facet_wrap(~quarter_f) +
+  scale_x_continuous(
+    name = "Scaled body length",
+    sec.axis = sec_axis(~ . * len_sd + len_mean, name = "Body length (cm)")
+  )
+fig_length_composition
+
+# Now calculate the differences between male and female
+sim_diff <- pred_sims_df |> 
+  pivot_longer("V1":"V1000", names_to = "sim", values_to = "est") |> 
+  summarise(sum_exp_est = sum(exp(est)), .by = c(quarter_f, body_length_cm_sc, sex, sim)) |> 
+  pivot_wider(names_from = sex, values_from = sum_exp_est) |>
+  mutate(diff = Female - Male) |> 
+  summarise(
+    mean_diff = mean(diff),
+    lo = quantile(diff, 0.025),
+    hi = quantile(diff, 0.975),
+    .by = c(body_length_cm_sc, quarter_f)
+    )
+
+ggplot(sim_diff, aes(body_length_cm_sc, mean_diff)) + 
+  geom_hline(yintercept = 0, lty = 2) +
+  geom_line() + 
+  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.3, color = NA) +
+  facet_wrap(~quarter_f)
+
+fig_simulations_heatmap <- ggplot(
+    sim_diff,
+    aes(body_length_cm_sc, quarter_f, fill = mean_diff)
+  ) +
+  geom_tile(color = "white", linewidth = 0.3) +
+  scale_fill_gradient2(
+    midpoint = 0,
+    low = "#0072B2", mid = "grey95", high = "#D55E00",
+    name = "Female \u2212 Male biomass difference (kg)"
+  ) +
+  scale_x_continuous(
+    name = "Scaled body length",
+    sec.axis = sec_axis(~ . * len_sd + len_mean, name = "Body length (cm)")
+  ) +
+  scale_y_discrete(labels = paste("Quarter", 1:4)) +
+  labs(x = "Scaled body length", y = NULL) +
+  guides(fill = guide_colorbar(title.position = "top"))
+fig_simulations_heatmap
+
+# Significance between male and female meaningful?
+plot_sim <- pred_sims_df |> 
+  pivot_longer("V1":"V1000", names_to = "sim", values_to = "est") |> 
+  mutate(body_length_cm = body_length_cm_sc * sd(diet_model_hybrid$body_length_cm) + mean(diet_model_hybrid$body_length_cm)) |> 
+  mutate(size_cat = ifelse(body_length_cm > 120, "Adult", "Juvenile")) |> 
+  summarise(sum_exp_est = sum(exp(est)), .by = c(quarter_f, sex, size_cat, sim)) |> 
+  pivot_wider(names_from = sex, values_from = sum_exp_est) |>
+  mutate(diff = Female - Male)
+
+labs <- plot_sim |>
+  summarise(
+    p_fem_gt = mean(diff > 0),
+    .by = c(quarter_f, size_cat)
+  )
+
+fig_simulations <- ggplot(plot_sim, aes(as.numeric(as.character(quarter_f)), diff)) +
+  geom_hline(yintercept = 0, lty = 2) +
+  facet_wrap(~size_cat) +
+  geom_jitter(data = plot_sim |>
+                group_by(quarter_f, size_cat) |>
+                sample_n(100),
+              aes(as.numeric(as.character(quarter_f)), diff),
+              alpha = 0.2, width = 0.2, height = 0) +
+  geom_boxplot(aes(group = quarter_f), fill = NA, outlier.color = NA, width = 0.2) +
+  geom_violin(aes(group = quarter_f), fill = NA) +
+  geom_text(
+    data = labs,
+    aes(x = as.numeric(as.character(quarter_f)), y = Inf,
+        label = paste0("p = ", round(p_fem_gt, 2))),
+    vjust = 1.5, inherit.aes = FALSE
+  ) +
+  labs(x = "Quarter", y = "Difference in biomass (Female - Male)")
+fig_simulations
+```
+
+## Hybrid biomass predictions per sample
+
+These plots keep predictions on the biomass-per-sample scale instead of converting them to relative composition. This is useful when the question is about absolute prey biomass rather than diet proportion.
+
+```{r hybrid-biomass-predictions}
+# Sex effect on biomass/sample from h11 (prediction model).
+nd_bio_sex <- expand_grid(
+  sex = factor(c("Female", "Male"), levels = levels(diet_model_hybrid$sex)),
+  prey_group = factor(prey_group_levels, levels = prey_group_levels)
+) |>
+  mutate(
+    body_length_cm = pred_length_hybrid,
+    body_length_cm_sc = (body_length_cm - mean(diet_model_hybrid$body_length_cm)) / sd(diet_model_hybrid$body_length_cm),
+    year = pred_year_hybrid,
+    year_ct = year - year_center,
+    year_f = factor(year, levels = levels(diet_model_hybrid$year_f)),
+    quarter_f = factor(1, levels = levels(diet_model_hybrid$quarter_f)),
+    X = median(diet_model_hybrid$X, na.rm = TRUE),
+    Y = median(diet_model_hybrid$Y, na.rm = TRUE)
+  )
+
+p_bio_sex <- predict(h11, newdata = nd_bio_sex, re_form = NA, re_form_iid = NA)
+
+bio_sex <- nd_bio_sex |>
+  bind_cols(as_tibble(p_bio_sex) |> select(est)) |>
+  mutate(biomass = exp(est))
+
+plot_bio_sex_stack <- bio_sex |>
+  ggplot(aes(sex, biomass, fill = prey_group)) +
+  geom_col(width = 0.6) +
+  labs(
+    title = "Predicted prey biomass per sample by sex",
+    subtitle = paste("Predictions from h11 | Length fixed at", round(pred_length_hybrid, 1), "cm and year", pred_year_hybrid),
+    x = NULL,
+    y = "Predicted biomass per sample (kg)",
+    fill = "Prey group"
+  )
+
+plot_bio_gadus_sex <- bio_sex |>
+  filter(prey_group == "Gadus morhua") |>
+  ggplot(aes(sex, biomass, fill = sex)) +
+  geom_col(width = 0.6, show.legend = FALSE) +
+  labs(
+    title = "Predicted Gadus morhua biomass per sample by sex",
+    subtitle = paste("Predictions from h11 | Length fixed at", round(pred_length_hybrid, 1), "cm and year", pred_year_hybrid),
+    x = NULL,
+    y = "Predicted biomass per sample (kg)"
+  )
+
+# Length effect on biomass/sample.
+length_seq_hybrid <- seq(
+  quantile(diet_model_hybrid$body_length_cm, 0.1, na.rm = TRUE),
+  quantile(diet_model_hybrid$body_length_cm, 0.9, na.rm = TRUE),
+  length.out = 60
+)
+
+nd_bio_length <- expand_grid(
+  body_length_cm = length_seq_hybrid,
+  sex = factor(c("Female", "Male"), levels = levels(diet_model_hybrid$sex)),
+  prey_group = factor(prey_group_levels, levels = prey_group_levels)
+) |>
+  mutate(
+    body_length_cm_sc = (body_length_cm - mean(diet_model_hybrid$body_length_cm)) / sd(diet_model_hybrid$body_length_cm),
+    year = pred_year_hybrid,
+    year_ct = year - year_center,
+    year_f = factor(year, levels = levels(diet_model_hybrid$year_f)),
+    quarter_f = factor(1, levels = levels(diet_model_hybrid$quarter_f)),
+    X = median(diet_model_hybrid$X, na.rm = TRUE),
+    Y = median(diet_model_hybrid$Y, na.rm = TRUE)
+  )
+
+p_bio_length <- predict(h11, newdata = nd_bio_length, re_form = NA, re_form_iid = NA)
+
+bio_length <- nd_bio_length |>
+  bind_cols(as_tibble(p_bio_length) |> select(est)) |>
+  mutate(biomass = exp(est))
+
+plot_bio_length_gadus <- bio_length |>
+  filter(prey_group == "Gadus morhua") |>
+  ggplot(aes(body_length_cm, biomass, color = sex)) +
+  geom_line(linewidth = 1) +
+  labs(
+    title = "Predicted Gadus morhua biomass per sample over seal length",
+    subtitle = paste("Predictions from h11 | Year fixed at", pred_year_hybrid),
+    x = "Body length (cm)",
+    y = "Predicted biomass per sample (kg)",
+    color = "Sex"
+  )
+
+# Quarter effect on biomass/sample.
+nd_bio_quarter <- expand_grid(
+  quarter_f = factor(c(1:4), levels = levels(diet_model_hybrid$quarter_f)),
+  sex = factor(c("Female", "Male"), levels = levels(diet_model_hybrid$sex)),
+  prey_group = factor(prey_group_levels, levels = prey_group_levels)
+) |>
+  mutate(
+    body_length_cm = pred_length_hybrid,
+    body_length_cm_sc = (body_length_cm - mean(diet_model_hybrid$body_length_cm)) / sd(diet_model_hybrid$body_length_cm),
+    year = pred_year_hybrid,
+    year_ct = year - year_center,
+    year_f = factor(year, levels = levels(diet_model_hybrid$year_f)),
+    X = median(diet_model_hybrid$X, na.rm = TRUE),
+    Y = median(diet_model_hybrid$Y, na.rm = TRUE)
+  )
+
+p_bio_quarter <- predict(h11, newdata = nd_bio_quarter, re_form = NA, re_form_iid = NA, se_fit = TRUE)
+
+bio_quarter <- nd_bio_quarter |>
+  bind_cols(as_tibble(p_bio_quarter) |> select(est, est_se)) |>
+  mutate(
+    biomass = exp(est),
+    lo = exp(est - 1.96 * est_se),
+    hi = exp(est + 1.96 * est_se)
+  )
+
+plot_bio_quarter_gadus <- bio_quarter |>
+  filter(prey_group == "Gadus morhua") |>
+  ggplot(aes(as.numeric(as.character(quarter_f)), biomass, color = sex)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.1, alpha = 0.6) +
+  scale_x_continuous(breaks = 1:4) +
+  labs(
+    x = "Quarter",
+    y = "Predicted biomass per sample (kg)",
+    color = "Sex"
+  )
+
+plot_bio_quarter_stack <- bio_quarter |>
+  ggplot(aes(quarter_f, biomass, fill = prey_group)) +
+  geom_col() +
+  facet_wrap(~sex) +
+  labs(
+    title = "Predicted prey biomass per sample by quarter",
+    subtitle = paste("Predictions from h11 | Length fixed at", round(pred_length_hybrid, 1), "cm and year", pred_year_hybrid),
+    x = "Quarter",
+    y = "Predicted biomass per sample (kg)",
+    fill = "Prey group"
+  )
+
+# Cod vs whiting over time at a representative location.
+nd_cod_whiting_time <- expand_grid(
+  year = sort(unique(diet_model_hybrid$year)),
+  sex = factor(c("Female", "Male"), levels = levels(diet_model_hybrid$sex)),
+  prey_group = factor(c("Gadus morhua", "Merlangius merlangus"), levels = prey_group_levels)
+) |>
+  mutate(
+    body_length_cm = pred_length_hybrid,
+    body_length_cm_sc = (body_length_cm - mean(diet_model_hybrid$body_length_cm)) / sd(diet_model_hybrid$body_length_cm),
+    year_ct = year - year_center,
+    year_f = factor(year, levels = levels(diet_model_hybrid$year_f)),
+    quarter_f = factor(1, levels = levels(diet_model_hybrid$quarter_f)),
+    X = median(diet_model_hybrid$X, na.rm = TRUE),
+    Y = median(diet_model_hybrid$Y, na.rm = TRUE)
+  )
+
+p_cod_whiting_time <- predict(h11, newdata = nd_cod_whiting_time, re_form = NA, re_form_iid = NA)
+
+cod_whiting_time <- nd_cod_whiting_time |>
+  bind_cols(as_tibble(p_cod_whiting_time) |> select(est)) |>
+  mutate(biomass = exp(est))
+
+plot_cod_whiting_time <- cod_whiting_time |>
+  ggplot(aes(year, biomass, color = prey_group)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.5) +
+  facet_wrap(~sex) +
+  labs(
+    title = "Predicted cod and whiting biomass per sample over time",
+    subtitle = paste("Predictions from h11 | Length fixed at", round(pred_length_hybrid, 1), "cm at a representative location"),
+    x = "Year",
+    y = "Predicted biomass per sample (kg)",
+    color = "Prey group"
+  )
+
+# Year-space biomass maps from the spatiotemporal model.
+map_years_hybrid <- unique(c(min(diet_model_hybrid$year), median(sort(unique(diet_model_hybrid$year))) |> round(), max(diet_model_hybrid$year)))
+
+pg_bio_space <- pred_grid_base |>
+  filter(year %in% map_years_hybrid) |>
+  expand_grid(
+    sex = factor(c("Female", "Male"), levels = levels(diet_model_hybrid$sex)),
+    prey_group = factor(prey_group_levels, levels = prey_group_levels)
+  ) |>
+  mutate(
+    body_length_cm = pred_length_hybrid,
+    body_length_cm_sc = (body_length_cm - mean(diet_model_hybrid$body_length_cm)) / sd(diet_model_hybrid$body_length_cm),
+    quarter_f = factor(1, levels = levels(diet_model_hybrid$quarter_f)),
+    year_f = factor(year, levels = levels(diet_model_hybrid$year_f)),
+    year_ct = year - year_center
+  )
+
+p_bio_space <- predict(h11, newdata = pg_bio_space)
+
+bio_space <- pg_bio_space |>
+  bind_cols(as_tibble(p_bio_space) |> select(est)) |>
+  mutate(biomass = exp(est)) |>
+  filter(prey_group == "Gadus morhua")
+
+plot_bio_space_gadus <- bio_space |>
+  ggplot(aes(X * 1000, Y * 1000, fill = biomass)) +
+  geom_raster() +
+  geom_sf(data = land, fill = "grey90", linewidth = 0.2, inherit.aes = FALSE) +
+  viridis::scale_fill_viridis(trans = "fourth_root_power") +
+  coord_sf(
+    crs = 32632,
+    xlim = range(bio_space$X * 1000),
+    ylim = range(bio_space$Y * 1000),
+    expand = FALSE
+  ) +
+  labs(
+    title = "Predicted Gadus morhua biomass per sample in space",
+    subtitle = paste("Predictions from h11 | Length fixed at", round(pred_length_hybrid, 1), "cm"),
+    x = "Longitude",
+    y = "Latitude",
+    fill = "Biomass\n(kg/sample)"
+  ) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  facet_grid(sex ~ year)
+
+# SVC field
+plot_svc <- p_bio_space |>
+  filter(year == min(year)) |> 
+  pivot_longer(starts_with("zeta"), names_to = "prey", values_to = "zeta") |> 
+  mutate(prey = str_remove(prey, "zeta_s_prey_group")) |> 
+  ggplot(aes(X * 1000, Y * 1000, fill = zeta)) +
+  geom_raster() +
+  geom_sf(data = land, fill = "grey90", linewidth = 0.2, inherit.aes = FALSE) +
+  #viridis::scale_fill_viridis(trans = "fourth_root_power") +
+  scale_fill_gradient2() + 
+  coord_sf(
+    crs = 32632,
+    xlim = range(bio_space$X * 1000),
+    ylim = range(bio_space$Y * 1000),
+    expand = FALSE
+  ) +
+  labs(
+    title = "Predicted Gadus morhua biomass per sample in space",
+    #subtitle = paste("Predictions from h11 | Length fixed at", round(pred_length_hybrid, 1), "cm"),
+    x = "Longitude",
+    y = "Latitude",
+    fill = "SVC"
+  ) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  facet_wrap(~ prey, ncol = 5)
+
+plot_bio_sex_stack
+plot_bio_gadus_sex
+plot_bio_length_gadus
+plot_bio_quarter_stack
+plot_bio_quarter_gadus
+plot_cod_whiting_time
+plot_bio_space_gadus
+plot_svc
+```
+
+## Save paper figures
+
+```{r fig-study-area}
+colony_sample_points <- diet_model_hybrid |>
+  distinct(sample_id, colony, X, Y)
+
+colony_summary <- colony_sample_points |>
+  summarise(
+    n = n(),
+    X = median(X, na.rm = TRUE),
+    Y = median(Y, na.rm = TRUE),
+    .by = colony
+  )
+
+ices_areas <- sf::st_read(
+  here::here("Data", "shapefiles", "ICES_areas", "ICES_Areas_20160601_cut_dense_3857.shp"),
+  quiet = TRUE
+) |>
+  st_transform(4326) |>
+  st_make_valid()
+
+# Invert the ICES areas so that land (the area not covered by ICES polygons)
+# is drawn in grey and the sea (the ICES polygons themselves) in light blue.
+map_extent <- st_as_sfc(st_bbox(ices_areas))
+inverted_shape <- st_difference(map_extent, st_union(st_geometry(ices_areas)))
+
+sea_layer <- ices_areas |>
+  st_transform(32632)
+land_layer <- st_sf(geometry = inverted_shape)
+land_layer <- land_layer[st_geometry_type(land_layer) %in% c("POLYGON", "MULTIPOLYGON"), ]
+land_layer <- st_transform(land_layer, 32632)
+
+lon_lim <- c(10.5, 12.8)
+pts_lon <- st_sfc(
+  st_point(c(lon_lim[1], median(diet_model_hybrid$lat))),
+  st_point(c(lon_lim[2], median(diet_model_hybrid$lat))),
+  crs = 4326
+) |>
+  st_transform(32632)
+easting_lim <- st_coordinates(pts_lon)[, 1]
+
+map_xlim <- easting_lim
+map_ylim <- extendrange(colony_sample_points$Y) * 1000
+
+fig_study_area_base <- ggplot() +
+  geom_sf(data = sea_layer, fill = "lightskyblue1", color = "grey50", linewidth = 0.3) +
+  geom_sf(data = land_layer, fill = "grey90", color = "grey50", linewidth = 0.2) +
+  geom_point(
+    data = colony_sample_points,
+    aes(X * 1000, Y * 1000, color = colony),
+    size = 0.8, alpha = 0.6
+  ) +
+  geom_text(
+    data = colony_summary,
+    aes(X * 1000, Y * 1000, label = paste0(colony, " (n = ", n, ")")),
+    nudge_x = (map_xlim[2] - map_xlim[1]) * 0.07,
+    hjust = 0,
+    size = 3
+  ) +
+  coord_sf(crs = 32632, xlim = map_xlim, ylim = map_ylim, expand = FALSE) +
+  ggspatial::annotation_scale(
+    location = "bl",
+    width_hint = 0.2,
+    bar_cols = c("black", "white"),
+    text_cex = 0.8
+  ) +
+  ggspatial::annotation_north_arrow(
+    location = "tl",
+    which_north = "true",
+    style = ggspatial::north_arrow_fancy_orienteering(
+      fill = c("black", "white")
+    ),
+    height = unit(1.2, "cm"),
+    width = unit(1.2, "cm")
+  ) +
+  labs(x = "Longitude", y = "Latitude") +
+  theme(legend.position = "none")
+
+# Inset: wider zoomed-out view of southern Scandinavia with the main map
+# extent highlighted.
+land_4326 <- land |>
+  st_transform(4326)
+
+main_extent_4326 <- st_as_sfc(st_bbox(c(
+  xmin = map_xlim[1], xmax = map_xlim[2],
+  ymin = map_ylim[1], ymax = map_ylim[2]
+), crs = 32632)) |>
+  st_transform(4326)
+
+inset_lim <- c(4, 16, 54, 63)
+
+inset_map <- ggplot() +
+  geom_sf(data = land_4326, fill = "grey85", color = "grey40", linewidth = 0.2) +
+  geom_sf(data = main_extent_4326, fill = NA, color = "red", linewidth = 0.6) +
+  coord_sf(
+    crs = 4326,
+    xlim = inset_lim[1:2],
+    ylim = inset_lim[3:4],
+    expand = FALSE
+  ) +
+  theme_void() +
+  theme(panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.8))
+
+fig_study_area <- fig_study_area_base +
+  patchwork::inset_element(
+    inset_map,
+    left = 0.70, bottom = 0.68, right = 0.99, top = 0.99
+  )
+fig_study_area
+```
+
+```{r fig-data-overview}
+overview_samples <- diet_model_hybrid |>
+  distinct(sample_id, year, month, sex, body_length_cm, colony, X, Y)
+
+p_len <- ggplot(overview_samples, aes(body_length_cm, fill = sex)) +
+  geom_histogram(bins = 20, color = "white", linewidth = 0.2) +
+  geom_vline(
+    data = overview_samples |>
+      summarise(median = median(body_length_cm, na.rm = TRUE), .by = sex) |>
+      # Medians coincide at 133 cm for both sexes; offset slightly so both
+      # lines are visible (mean-preserving around 133).
+      mutate(median = if_else(sex == "Female", median - 0.75, median + 0.75)),
+    aes(xintercept = median, color = sex),
+    linetype = "dashed", linewidth = 0.7,
+    show.legend = FALSE
+  ) +
+  scale_color_manual(values = c("Female" = "#F8766D", "Male" = "#00BFC4")) +
+  labs(x = "Body length (cm)", y = "Number of samples", fill = "Sex")
+
+p_colony <- overview_samples |>
+  count(colony, sex) |>
+  mutate(colony = fct_relevel(colony, colony_keep)) |>
+  ggplot(aes(colony, n, fill = sex)) +
+  geom_col(position = "stack", width = 0.7) +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 9)) +
+  labs(x = NULL, y = "Number of samples", fill = "Sex") +
+  theme(legend.position = "none")
+
+p_time <- ggplot(overview_samples, aes(year, fill = sex)) +
+  geom_bar(color = "white", linewidth = 0.2) +
+  scale_x_continuous(
+    breaks = seq(min(overview_samples$year), max(overview_samples$year), by = 2)
+  ) +
+  labs(x = "Year", y = "Number of samples", fill = "Sex") +
+  theme(legend.position = "none")
+
+fig_data_overview <- (p_len | p_colony) / (p_time + patchwork::plot_spacer()) +
+  patchwork::plot_annotation(tag_levels = "a") +
+  patchwork::plot_layout(guides = "collect")
+fig_data_overview
+```
+
+```{r fig-diet-by-colony}
+# Colony order north to south
+colony_order <- c("Koster", "Vaderoarna", "Lysekil", "Marstrand", "Onsala")
+
+# Sample sizes per colony
+colony_n <- diet_model_hybrid |>
+  distinct(sample_id, colony) |>
+  count(colony, name = "n")
+
+# Pooled across all colonies
+pooled <- diet_model_hybrid |>
+  summarise(biomass_kg = sum(biomass_kg, na.rm = TRUE), .by = prey_group) |>
+  mutate(
+    colony = "All colonies",
+    pct = biomass_kg / sum(biomass_kg) * 100
+  )
+
+# Per colony
+per_colony <- diet_model_hybrid |>
+  summarise(biomass_kg = sum(biomass_kg, na.rm = TRUE), .by = c(colony, prey_group)) |>
+  mutate(pct = biomass_kg / sum(biomass_kg) * 100, .by = colony)
+
+# Combine and build x-axis labels with n
+n_total <- n_distinct(diet_model_hybrid$sample_id)
+x_labels <- c(
+  paste0("All colonies\n(n = ", n_total, ")"),
+  sapply(colony_order, function(col) {
+    n <- colony_n$n[colony_n$colony == col]
+    paste0(col, "\n(n = ", n, ")")
+  })
+)
+names(x_labels) <- c("All colonies", colony_order)
+
+fig_diet_colony <- bind_rows(pooled, per_colony) |>
+  mutate(
+    colony = factor(colony, levels = c("All colonies", colony_order)),
+    prey_group = factor(prey_group, levels = prey_group_levels)
+  ) |>
+  ggplot(aes(colony, pct, fill = prey_group)) +
+  geom_col(position = "stack", width = 0.7) +
+  scale_fill_manual(values = prey_palette_9, name = "Prey group") +
+  scale_x_discrete(labels = x_labels) +
+  labs(
+    x = NULL,
+    y = "Percentage of estimated biomass (%)"
+  )
+fig_diet_colony
+```
+
+```{r save-figures}
+fig_dir <- here::here("paper", "figures")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Figure – study area map
+ggsave(file.path(fig_dir, "study_area.pdf"),
+       fig_study_area, width = 7, height = 6)
+
+# Figure – data overview: length, sex, time (3 panels)
+ggsave(file.path(fig_dir, "data_overview.pdf"),
+       fig_data_overview, width = 9, height = 6)
+
+# Figure – prey composition % biomass by colony
+ggsave(file.path(fig_dir, "diet_by_colony.pdf"),
+       fig_diet_colony, width = 8, height = 5)
+
+# Figure – total biomass ribbon over scaled body length by quarter
+ggsave(file.path(fig_dir, "length_composition.pdf"),
+       fig_length_composition, width = 9, height = 6)
+
+# Figure – stacked prey biomass bars by sex, body length x quarter
+ggsave(file.path(fig_dir, "sex_quarter.pdf"),
+       fig_sex_quarter, width = 9, height = 7)
+
+# Figure – Female minus Male difference boxplot by quarter x size class
+ggsave(file.path(fig_dir, "simulations.pdf"),
+       fig_simulations, width = 8, height = 5)
+
+# Figure – Female minus Male difference heatmap over length x quarter
+ggsave(file.path(fig_dir, "simulations_diff_heatmap.pdf"),
+       fig_simulations_heatmap, width = 8, height = 5)
+
+# Figure – Gadus morhua biomass by quarter and sex
+ggsave(file.path(fig_dir, "gadus_quarter.pdf"),
+       plot_bio_quarter_gadus, width = 7, height = 5)
+
+# Figure – QQ plot of model residuals
+pdf(file.path(fig_dir, "qqplot.pdf"), width = 5, height = 5)
+print(fig_qqplot)
+dev.off()
+```
